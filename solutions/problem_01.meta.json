@@ -1,0 +1,239 @@
+{
+  "phase": 3,
+  "problem_id": "1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3",
+  "source": "problems/problem_01.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/problem_01.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/problem_01.py",
+  "target_language": "python",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": null,
+  "elapsed_s": 26.603,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 2840,
+    "completion_tokens": 9959,
+    "calls": 3,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 1
+    },
+    "by_provider": {
+      "gemini": 2,
+      "groq": 1
+    }
+  },
+  "analysis": {
+    "problem_id": "1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "simulate_writes",
+    "signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)",
+    "io_mode": "function",
+    "statement": "Simulate a congestion-aware virtual-adapter write worker with a shared spin-credit reservoir.\n\nDefine `simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)`.\n\n`lengths` is a list of packet lengths. A packet is valid exactly when its length is in `[1, 65535]`. Invalid packets make no attempt and change no shared state.\n\n`outcomes` is a run-length encoded chronological list of `(kind, count)` pairs. `kind` is `\"ok\"`, `\"full\"`, or `\"error\"`, and `count` is positive. Every write attempt consumes one outcome. After all runs are exhausted, every later attempt implicitly returns `\"error\"`.\n\nThe worker has a congestion level, initially zero and always in `[0, level_cap]`, and a spin-credit balance, initially `initial_credits` and always in `[0, credit_cap]`. Valid packets are processed in order:\n\n* `\"ok\"` sends the packet, decreases the level by one without going below zero, then adds the packet's length to the credit balance, capped at `credit_cap`.\n* `\"error\"` fails the packet and resets the level to zero. Credits are unchanged.\n* `\"full\"` raises the level by one, capped at `level_cap`. Let `old_level` be the level before this increase and l",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "Constraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`."
+    ],
+    "huge_bounds": [
+      "10**18",
+      "10**30",
+      "200,000"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: implicit",
+      "wording: exactly",
+      "wording: without going below"
+    ],
+    "algorithmic_traps": [
+      "algorithm: run-length"
+    ],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "return_hint": "dict",
+    "difficulty": "hard",
+    "proto_entrypoint": "simulate_writes",
+    "proto_signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)"
+  },
+  "plan": {
+    "approach": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.",
+    "data_structures": [
+      "dicts/lists sized by input",
+      "avoid dense grids"
+    ],
+    "complexity_target": "near-linear in the given input length",
+    "traps_to_handle": [
+      "algorithm: run-length",
+      "wording: implicit",
+      "wording: exactly",
+      "wording: without going below",
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "python_signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)",
+    "return_shape": "dict",
+    "test_ideas": [
+      "smallest legal input with a known expected value from the spec",
+      "invalid / implicit-error / boundary wording trap",
+      "a case that would explode if a huge bound is looped"
+    ],
+    "model": "gemini-2.5-flash-lite",
+    "fallback": true,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 952,
+    "completion_tokens": 7380,
+    "kind": "python",
+    "provider": "groq"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": true,
+    "summary": "5/5 local tests passed",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "spec_empty",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "spec_invalid",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "spec_implicit_error",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "spec_one_ok",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      }
+    ],
+    "hints": []
+  },
+  "rust_verify": null,
+  "repairs": [],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 64.0,
+    "ok": true,
+    "slow": false,
+    "summary": "64.0ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "loaded problem_01.json id=1ba0d34fae43\u2026",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "lang=python entrypoint=simulate_writes difficulty=hard huge_bounds=3 traps=4",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 5.78,
+      "remaining_s": 294.22,
+      "detail": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays",
+      "extra": {
+        "model": "gemini-2.5-flash-lite",
+        "fallback": true,
+        "node": "plan"
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 21.8,
+      "remaining_s": 278.2,
+      "detail": "python chars=8619 model=openai/gpt-oss-120b tier=strong provider=groq",
+      "extra": {
+        "node": "generate",
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 952,
+        "completion_tokens": 7380,
+        "kind": "python",
+        "provider": "groq"
+      }
+    },
+    {
+      "stage": "tests",
+      "elapsed_s": 26.382,
+      "remaining_s": 273.618,
+      "detail": "prepared 5 tests (0 adversarial)",
+      "extra": {
+        "used": true,
+        "node": "tests"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 26.538,
+      "remaining_s": 273.462,
+      "detail": "5/5 local tests passed",
+      "extra": {
+        "used": true,
+        "ok": true,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 26.602,
+      "remaining_s": 273.398,
+      "detail": "64.0ms over 2 cases",
+      "extra": {
+        "used": true,
+        "node": "write"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 26.604,
+      "remaining_s": 273.396,
+      "detail": "problem_01.py verified=True",
+      "extra": {
+        "node": "write"
+      }
+    }
+  ],
+  "graph": "langgraph"
+}

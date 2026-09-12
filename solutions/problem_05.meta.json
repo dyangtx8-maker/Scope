@@ -1,0 +1,269 @@
+{
+  "phase": 2,
+  "problem_id": "4e49a099fd84fad956c856b0bb613db05b87316550730c4ac1329a2f26775465",
+  "source": "problems/problem_05.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/problem_05.rs",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/problem_05.py",
+  "target_language": "rust",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": true,
+  "elapsed_s": 28.389,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 3990,
+    "completion_tokens": 11902,
+    "calls": 5,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 3
+    }
+  },
+  "analysis": {
+    "problem_id": "4e49a099fd84fad956c856b0bb613db05b87316550730c4ac1329a2f26775465",
+    "source_language": "rust",
+    "target_language": "rust",
+    "entrypoint": "main",
+    "signature": "fn main()",
+    "io_mode": "stdin",
+    "statement": "## Unicode Matchday Repeats\n\nA scoreboard stores one UTF-8 banner `S`. Officials index it by **League Graphemes**, while broadcasts use UTF-16 code-unit offsets.\n\nThe beginning and end of `S` are grapheme boundaries. For each internal gap between adjacent Unicode scalar values, apply the first matching rule:\n\n1. Between U+000D and U+000A, there is no boundary.\n2. If either scalar is a control, there is a boundary. Controls are U+0000..U+001F and U+007F..U+009F.\n3. If the right scalar is an Attachment or U+200D, there is no boundary.\n4. If the left scalar is U+200D, the right scalar is an Emoji, and the nearest scalar before that U+200D after skipping Attachments is an Emoji, there is no boundary.\n5. If both scalars are Regional Indicators, count the consecutive Regional Indicators ending at the left scalar. There is no boundary exactly when that count is odd.\n6. Otherwise, there is a boundary.\n\nAttachment ranges are U+0300..U+036F, U+1AB0..U+1AFF, U+1DC0..U+1DFF, U+20D0..U+20FF, U+FE00..U+FE0F, U+FE20..U+FE2F, U+1F3FB..U+1F3FF, and U+E0100..U+E01EF. Emoji ranges are U+2600..U+27BF and U+1F000..U+1FAFF. Regional Indicators are U+1F1E6..U+1F1FF. Classes may overlap; rule order is aut",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "A scalar at most U+FFFF occupies one UTF-16 code unit; a larger scalar occupies two.",
+      "Constraints: `|S| <= 600,000` UTF-8 bytes and `1 <= Q <= 300,000`."
+    ],
+    "huge_bounds": [
+      "300,000",
+      "600,000"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: exactly"
+    ],
+    "algorithmic_traps": [
+      "algorithm: grapheme",
+      "algorithm: utf-16"
+    ],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "return_hint": "stdout tokens",
+    "difficulty": "hard",
+    "proto_entrypoint": "solve",
+    "proto_signature": "solve(stdin: str) -> str"
+  },
+  "plan": {
+    "approach": "Parse S into a vector of grapheme structs, each storing its UTF\u20118 byte slice, UTF\u201116 length, and scalar properties needed for boundary rules. Compute a prefix array of UTF\u201116 offsets for each grapheme boundary. For queries, resolve signed indices to 0\u2011based grapheme positions using G+index for negatives, clamped to [0,G]. For type\u00a01, output the stored UTF\u201116 offsets at positions i and j (or i twice if j<i). For type\u00a02, perform a binary\u2011search on the maximum common prefix length L using a rolling\u2011hash (e.g., two 64\u2011bit moduli) over the UTF\u20118 byte sequences of graphemes. Each grapheme\u2019s hash is pre\u2011computed; prefix hashes allow O(1) substring hash. Binary search over [0, min(G-i,G-j)] gives L. The UTF\u201116 length of the substring is prefix_utf16[i+L]\u2212prefix_utf16[i]. Complexity per query O(log\u202fG).",
+    "data_structures": [
+      "grapheme { bytes: Vec<u8>, utf16_len: u32, scalar: u32, is_control: bool, is_attachment: bool, is_emoji: bool, is_regional: bool }",
+      "Vec<grapheme> graphemes",
+      "Vec<u32> utf16_prefix",
+      "Vec<u64> hash1_prefix",
+      "Vec<u64> hash2_prefix"
+    ],
+    "complexity_target": "O(|S| + Q\u202flog\u202f|S|) time, O(|S|) memory",
+    "traps_to_handle": [
+      "Large |S| up to 600k bytes \u2013 avoid per\u2011byte loops in queries",
+      "UTF\u201116 length calculation for scalars >U+FFFF \u2013 use 2 units",
+      "Boundary rule precedence \u2013 implement in order, short\u2011circuit",
+      "Negative indices \u2013 clamp after adding G",
+      "Binary search bounds \u2013 ensure inclusive/exclusive correct",
+      "Hash collisions \u2013 use double hashing",
+      "UTF\u20118 parsing \u2013 use Rust\u2019s char iterator to get scalars",
+      "UTF\u201116 code unit count \u2013 pre\u2011compute per grapheme"
+    ],
+    "python_signature": "def solve(stdin: str) -> str",
+    "return_shape": "string of space\u2011separated integers, one line per query",
+    "test_ideas": [
+      "Simple S with ASCII only, test all query types",
+      "S containing CRLF to test rule\u00a01",
+      "S with control characters to test rule\u00a02",
+      "S with attachment characters to test rule\u00a03",
+      "S with ZWJ sequences to test rule\u00a04",
+      "S with regional indicator pairs to test rule\u00a05",
+      "S with emojis to test rule\u00a06",
+      "Queries with negative indices and out\u2011of\u2011range indices",
+      "Queries where j<i for type\u00a01",
+      "Queries where L=0 for type\u00a02",
+      "Large random S and many queries to test performance"
+    ],
+    "model": "openai/gpt-oss-20b",
+    "fallback": false,
+    "emit_rust": true
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 1382,
+    "completion_tokens": 6346,
+    "kind": "python"
+  },
+  "generate_rust": {
+    "model": "local-fallback",
+    "fallback": true,
+    "tier": "strong",
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "kind": "rust",
+    "repair": {
+      "model": "openai/gpt-oss-120b",
+      "fallback": false,
+      "tier": "strong",
+      "prompt_tokens": 387,
+      "completion_tokens": 4773,
+      "previous_summary": "rust program does not produce output"
+    }
+  },
+  "verify": {
+    "ok": true,
+    "summary": "2/4 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "empty_stdin",
+        "ok": true,
+        "detail": "passed",
+        "kind": "smoke"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "basic_ascii_type1",
+        "ok": false,
+        "detail": "StopIteration",
+        "kind": "adversarial"
+      },
+      {
+        "name": "basic_ascii_type2",
+        "ok": false,
+        "detail": "StopIteration",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "basic_ascii_type1: StopIteration",
+      "basic_ascii_type2: StopIteration"
+    ]
+  },
+  "rust_verify": {
+    "ok": true,
+    "summary": "rust static ok",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [],
+    "hints": []
+  },
+  "repairs": [],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 65.61,
+    "ok": true,
+    "slow": false,
+    "summary": "65.61ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "tool:read_problem",
+      "elapsed_s": 0.0,
+      "remaining_s": 300.0,
+      "detail": "loaded problem_05.json id=4e49a099fd84\u2026",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "tool:analyze_constraints",
+      "elapsed_s": 0.001,
+      "remaining_s": 299.999,
+      "detail": "lang=rust entrypoint=main difficulty=hard huge_bounds=2 traps=3",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 1.212,
+      "remaining_s": 298.788,
+      "detail": "Parse S into a vector of grapheme structs, each storing its UTF\u20118 byte slice, UTF\u201116 length, and scalar properties needed for boundary rules. Compute a prefix a",
+      "extra": {
+        "model": "openai/gpt-oss-20b",
+        "fallback": false
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 15.038,
+      "remaining_s": 284.962,
+      "detail": "python chars=6238 model=openai/gpt-oss-120b tier=strong",
+      "extra": {
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 1382,
+        "completion_tokens": 6346,
+        "kind": "python"
+      }
+    },
+    {
+      "stage": "tool:generate_tests",
+      "elapsed_s": 15.574,
+      "remaining_s": 284.426,
+      "detail": "prepared 4 tests (2 adversarial)",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "tool:run_solution",
+      "elapsed_s": 15.668,
+      "remaining_s": 284.332,
+      "detail": "2/4 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true
+      }
+    },
+    {
+      "stage": "generate_rust",
+      "elapsed_s": 15.765,
+      "remaining_s": 284.235,
+      "detail": "chars=129 model=local-fallback",
+      "extra": {
+        "model": "local-fallback",
+        "fallback": true,
+        "tier": "strong",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "kind": "rust"
+      }
+    },
+    {
+      "stage": "repair_rust",
+      "elapsed_s": 28.323,
+      "remaining_s": 271.677,
+      "detail": "rust static ok",
+      "extra": {
+        "ok": true
+      }
+    },
+    {
+      "stage": "tool:benchmark_solution",
+      "elapsed_s": 28.389,
+      "remaining_s": 271.611,
+      "detail": "65.61ms over 2 cases",
+      "extra": {
+        "used": true
+      }
+    }
+  ]
+}

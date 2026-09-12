@@ -1,0 +1,236 @@
+{
+  "phase": 3,
+  "problem_id": "6eca8a9120e08a6e5ef9287cd54499cb6e04ff87927037c5f656dc5e2ff4e08f",
+  "source": "samples/6eca8a9120e08a6e5ef9287cd54499cb6e04ff87927037c5f656dc5e2ff4e08f.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/6eca8a9120e08a6e5ef9287cd54499cb6e04ff87927037c5f656dc5e2ff4e08f.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/6eca8a9120e08a6e5ef9287cd54499cb6e04ff87927037c5f656dc5e2ff4e08f.py",
+  "target_language": "python",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": null,
+  "elapsed_s": 86.431,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 3555,
+    "completion_tokens": 11601,
+    "calls": 4,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 1,
+      "normal": 1
+    },
+    "by_provider": {
+      "gemini": 1,
+      "openai": 2,
+      "groq": 1
+    }
+  },
+  "analysis": {
+    "problem_id": "6eca8a9120e08a6e5ef9287cd54499cb6e04ff87927037c5f656dc5e2ff4e08f",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "capture_binders",
+    "signature": "capture_binders(nodes, expr_root, target, replacement_root)",
+    "io_mode": "function",
+    "statement": "Implement `capture_binders(nodes, expr_root, target, replacement_root)`.\n\n`nodes` is a list of immutable term records. Child references are indices into `nodes`. A declaration is `(id, name)`, where `id` is a nonnegative integer and `name` is a string.\n\nTerm records are:\n\n- `(\"var\", name)`\n- `(\"call\", children)` \u2014 all children use the current scope.\n- `(\"bind\", declarations, body)` \u2014 all declarations scope over `body`.\n- `(\"let\", declaration, value, body)` \u2014 the declaration scopes over `body`, but not `value`.\n- `(\"match\", scrutinee, shared, arms)` \u2014 `scrutinee` is outside all arm scopes. `shared` scopes over every arm body, but not auxiliary terms. Each nonempty `arms` list contains:\n  - `(\"ctor\", fields, auxiliaries, body)`: `shared` and `fields` scope over `body` only.\n  - `(\"zero\", auxiliaries, body)`: `shared` scopes over `body` only.\n  - `(\"succ\", predecessor, auxiliaries, body)`: `shared` and `predecessor` scope over `body` only.\n\nEvery auxiliary term uses the scope surrounding the whole `match`.\n\nThe replacement-rooted term is a tree. The expression-rooted term is instead an acyclic directed graph: a node may have multiple incoming child references. Its meaning for this tas",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "Across both rooted structures there are at most 250,000 nodes and at most 500,000 child references plus declaration-to-scope incidences. Graph paths and replacement-tree depth may be linear in the node count. Names may be long. Only the sta"
+    ],
+    "huge_bounds": [
+      "250,000",
+      "500,000"
+    ],
+    "materialization_risks": [
+      "materialization: unfold"
+    ],
+    "wording_traps": [
+      "wording: exactly"
+    ],
+    "algorithmic_traps": [
+      "algorithm: capture",
+      "algorithm: alpha-renaming"
+    ],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "return_hint": "list[int]",
+    "difficulty": "hard",
+    "proto_entrypoint": "capture_binders",
+    "proto_signature": "capture_binders(nodes, expr_root, target, replacement_root)"
+  },
+  "plan": {
+    "approach": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.",
+    "data_structures": [
+      "dicts/lists sized by input",
+      "avoid dense grids"
+    ],
+    "complexity_target": "near-linear in the given input length",
+    "traps_to_handle": [
+      "algorithm: capture",
+      "algorithm: alpha-renaming",
+      "wording: exactly",
+      "materialization: unfold",
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "python_signature": "capture_binders(nodes, expr_root, target, replacement_root)",
+    "return_shape": "list[int]",
+    "test_ideas": [
+      "smallest legal input with a known expected value from the spec",
+      "invalid / implicit-error / boundary wording trap",
+      "a case that would explode if a huge bound is looped"
+    ],
+    "model": "gemini-2.5-flash-lite",
+    "fallback": true,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "normal",
+    "prompt_tokens": 931,
+    "completion_tokens": 2293,
+    "kind": "python",
+    "provider": "groq"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": true,
+    "summary": "2/4 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "single_var_no_replacement",
+        "ok": true,
+        "detail": "passed",
+        "kind": "adversarial"
+      },
+      {
+        "name": "simple_bind_capture",
+        "ok": false,
+        "detail": "timeout after 3.0s",
+        "kind": "adversarial"
+      },
+      {
+        "name": "let_no_capture_replacement_shadowed",
+        "ok": false,
+        "detail": "timeout after 3.0s",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "simple_bind_capture: timeout after 3.0s",
+      "let_no_capture_replacement_shadowed: timeout after 3.0s"
+    ]
+  },
+  "rust_verify": null,
+  "repairs": [],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 3050.78,
+    "ok": false,
+    "slow": true,
+    "summary": "3050.78ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.01,
+      "remaining_s": 299.99,
+      "detail": "loaded 6eca8a9120e08a6e5ef9287cd54499cb6e04ff87927037c5f656dc5e2ff4e08f.json id=6eca8a9120e0\u2026",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "lang=python entrypoint=capture_binders difficulty=hard huge_bounds=2 traps=3",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 5.446,
+      "remaining_s": 294.554,
+      "detail": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays",
+      "extra": {
+        "model": "gemini-2.5-flash-lite",
+        "fallback": true,
+        "node": "plan"
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 70.811,
+      "remaining_s": 229.189,
+      "detail": "python chars=7231 model=openai/gpt-oss-120b tier=normal provider=groq",
+      "extra": {
+        "node": "generate",
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "normal",
+        "prompt_tokens": 931,
+        "completion_tokens": 2293,
+        "kind": "python",
+        "provider": "groq"
+      }
+    },
+    {
+      "stage": "tests",
+      "elapsed_s": 77.302,
+      "remaining_s": 222.698,
+      "detail": "prepared 4 tests (3 adversarial)",
+      "extra": {
+        "used": true,
+        "node": "tests"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 83.378,
+      "remaining_s": 216.622,
+      "detail": "2/4 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 86.43,
+      "remaining_s": 213.57,
+      "detail": "3050.78ms over 2 cases",
+      "extra": {
+        "used": true,
+        "node": "write"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 86.432,
+      "remaining_s": 213.568,
+      "detail": "6eca8a9120e08a6e5ef9287cd54499cb6e04ff87927037c5f656dc5e2ff4e08f.py verified=True",
+      "extra": {
+        "node": "write"
+      }
+    }
+  ],
+  "graph": "langgraph"
+}

@@ -1,0 +1,289 @@
+{
+  "phase": 3,
+  "problem_id": "6e43a08ec05a97ff0489d2f75736b87e39e02d8691f594495efc6cd83b485c98",
+  "source": "samples/6e43a08ec05a97ff0489d2f75736b87e39e02d8691f594495efc6cd83b485c98.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/6e43a08ec05a97ff0489d2f75736b87e39e02d8691f594495efc6cd83b485c98.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/6e43a08ec05a97ff0489d2f75736b87e39e02d8691f594495efc6cd83b485c98.py",
+  "target_language": "python",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": null,
+  "elapsed_s": 32.301,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 2659,
+    "completion_tokens": 10888,
+    "calls": 4,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 2
+    },
+    "by_provider": {
+      "gemini": 2,
+      "groq": 2
+    }
+  },
+  "analysis": {
+    "problem_id": "6e43a08ec05a97ff0489d2f75736b87e39e02d8691f594495efc6cd83b485c98",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "normalize_protection",
+    "signature": "normalize_protection(ranges, edits, max_row, max_col)",
+    "io_mode": "function",
+    "statement": "Implement `normalize_protection(ranges, edits, max_row, max_col)`.\n\nEach element of `ranges` is an inclusive rectangle `(r1, c1, r2, c2)` of protected cells within a fixed worksheet of `max_row` by `max_col` cells. Rectangles may overlap or touch and collectively denote their union.\n\nApply every edit in `edits`, in order. An edit is `(axis, index, delta)`, where `axis` is `\"row\"` or `\"column\"` and `delta != 0`. Coordinates on the other axis are unchanged.\n\nFor `delta > 0`, insert `delta` unprotected lines immediately before `index`. Existing cells before `index` stay fixed, cells at or after `index` move by `delta`, and cells moved beyond the fixed worksheet boundary are discarded.\n\nFor `delta < 0`, let `d = -delta`. Delete lines `index` through `index+d-1`. Cells in them disappear, later cells move by `-d`, and the final `d` lines become unprotected. Thus worksheet dimensions never change.\n\nEvery edit is valid when it is applied: `1 <= index <=` the relevant dimension, and a deletion interval lies entirely within that dimension. Inserted lines can be affected by later edits but remain unprotected unless protected content is subsequently moved onto their coordinates. Protection bel",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "Do not enumerate individual worksheet cells or rows. There are at most 30,000 input rectangles and 30,000 edits; dimensions are at most `10**9`. If each input rectangle is tracked independently through all edits and represented by maximal s"
+    ],
+    "huge_bounds": [
+      "10**9",
+      "150,000",
+      "200,000",
+      "30,000"
+    ],
+    "materialization_risks": [
+      "materialization: do not enumerate",
+      "materialization: independently through all edits"
+    ],
+    "wording_traps": [],
+    "algorithmic_traps": [],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "return_hint": "list",
+    "difficulty": "hard",
+    "proto_entrypoint": "normalize_protection",
+    "proto_signature": "normalize_protection(ranges, edits, max_row, max_col)"
+  },
+  "plan": {
+    "approach": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.",
+    "data_structures": [
+      "dicts/lists sized by input",
+      "avoid dense grids"
+    ],
+    "complexity_target": "near-linear in the given input length",
+    "traps_to_handle": [
+      "materialization: do not enumerate",
+      "materialization: independently through all edits",
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "python_signature": "normalize_protection(ranges, edits, max_row, max_col)",
+    "return_shape": "list",
+    "test_ideas": [
+      "smallest legal input with a known expected value from the spec",
+      "invalid / implicit-error / boundary wording trap",
+      "a case that would explode if a huge bound is looped"
+    ],
+    "model": "gemini-2.5-flash-lite",
+    "fallback": false,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 843,
+    "completion_tokens": 8000,
+    "kind": "python",
+    "provider": "groq"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": true,
+    "summary": "2/5 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "spec_empty",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "simple insertion",
+        "ok": false,
+        "detail": "expected [[3, 1, 3, 1]] got []",
+        "kind": "adversarial"
+      },
+      {
+        "name": "simple deletion",
+        "ok": false,
+        "detail": "expected [] got [[1, 2, 1, 2]]",
+        "kind": "adversarial"
+      },
+      {
+        "name": "insertion shifts protection",
+        "ok": false,
+        "detail": "expected [[2, 2, 2, 2]] got [[2, 1, 2, 1]]",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "simple insertion: expected [[3, 1, 3, 1]] got []",
+      "simple deletion: expected [] got [[1, 2, 1, 2]]",
+      "insertion shifts protection: expected [[2, 2, 2, 2]] got [[2, 1, 2, 1]]"
+    ]
+  },
+  "rust_verify": null,
+  "repairs": [
+    {
+      "attempt": 1,
+      "ok": true,
+      "kept": true,
+      "summary": "2/5 local tests passed (adversarial mismatches only)",
+      "model": "openai/gpt-oss-120b",
+      "tier": "strong"
+    }
+  ],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 59.71,
+    "ok": true,
+    "slow": false,
+    "summary": "59.71ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "loaded 6e43a08ec05a97ff0489d2f75736b87e39e02d8691f594495efc6cd83b485c98.json id=6e43a08ec05a\u2026",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "lang=python entrypoint=normalize_protection difficulty=hard huge_bounds=4 traps=0",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 4.842,
+      "remaining_s": 295.158,
+      "detail": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays",
+      "extra": {
+        "model": "gemini-2.5-flash-lite",
+        "fallback": false,
+        "node": "plan"
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 24.222,
+      "remaining_s": 275.778,
+      "detail": "python chars=170 model=openai/gpt-oss-120b tier=strong provider=groq",
+      "extra": {
+        "node": "generate",
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 843,
+        "completion_tokens": 8000,
+        "kind": "python",
+        "provider": "groq"
+      }
+    },
+    {
+      "stage": "tests",
+      "elapsed_s": 26.092,
+      "remaining_s": 273.908,
+      "detail": "prepared 5 tests (3 adversarial)",
+      "extra": {
+        "used": true,
+        "node": "tests"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 26.094,
+      "remaining_s": 273.906,
+      "detail": "stub marker: NotImplementedError",
+      "extra": {
+        "used": true,
+        "ok": false,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 26.095,
+      "remaining_s": 273.905,
+      "detail": "2 repair hints",
+      "extra": {
+        "used": true,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 26.095,
+      "remaining_s": 273.905,
+      "detail": "attempt 1/3",
+      "extra": {
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 32.116,
+      "remaining_s": 267.884,
+      "detail": "2/5 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "ok": true,
+        "repair": 1,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 32.24,
+      "remaining_s": 267.76,
+      "detail": "2/5 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 32.3,
+      "remaining_s": 267.7,
+      "detail": "59.71ms over 2 cases",
+      "extra": {
+        "used": true,
+        "node": "write"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 32.302,
+      "remaining_s": 267.698,
+      "detail": "6e43a08ec05a97ff0489d2f75736b87e39e02d8691f594495efc6cd83b485c98.py verified=True",
+      "extra": {
+        "node": "write"
+      }
+    }
+  ],
+  "graph": "langgraph"
+}

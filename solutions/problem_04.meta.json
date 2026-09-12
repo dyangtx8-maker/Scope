@@ -1,0 +1,207 @@
+{
+  "phase": 2,
+  "problem_id": "2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb",
+  "source": "problems/problem_04.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/problem_04.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/problem_04.py",
+  "target_language": "python",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": null,
+  "elapsed_s": 28.001,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 3226,
+    "completion_tokens": 2239,
+    "calls": 4,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 1,
+      "normal": 1
+    }
+  },
+  "analysis": {
+    "problem_id": "2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "refresh_references",
+    "signature": "refresh_references(initial, snapshots, references)",
+    "io_mode": "function",
+    "statement": "## Refresh temporally activated package-backed references\n\nImplement `refresh_references(initial, snapshots, references)` and return one tuple per reference, in input order:\n\n`(status, namespace, location, hash)`\n\n`status` is `\"invalid\"`, `\"missing\"`, or `\"located\"`.\n\nThe initial index is snapshot 0. Applying atomic batch `i` produces snapshot `i`. An entry has `namespace`, `name`, `version`, and nonempty opaque `hash`. An update has the same fields, but `hash=None` deletes its key. A key is `(namespace, name, version)`. Keys are unique within `initial` and within each batch. Namespaces are `\"type\"`, `\"function\"`, and `\"value\"`. Names are canonical dot-separated fully qualified names. Type versions are `None`; function/value versions are `None` or integers.\n\nA reference has `namespace`, `text`, `context`, `location`, `hash`, and `start`. `start` is an integer from 0 through `len(snapshots)`: the reference does not exist before that snapshot and is processed at `start` and every later snapshot. If `location` is `None`, `hash` is also `None`; otherwise both are canonical and nonempty respectively.\n\nIdentifiers contain only ASCII letters, digits, or `_`. Module identifiers and functio",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "All non-reference input obeys its canonical rules. There are at most 200,000 snapshots, entries, updates, and references each, and at most 1,000,000 induced candidate names. Use only the standard library, with no I/O or global state."
+    ],
+    "huge_bounds": [
+      "1,000,000",
+      "200,000"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: never processed",
+      "wording: location-authoritative"
+    ],
+    "algorithmic_traps": [],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "return_hint": "see statement",
+    "difficulty": "hard",
+    "proto_entrypoint": "refresh_references",
+    "proto_signature": "refresh_references(initial, snapshots, references)"
+  },
+  "plan": {
+    "approach": "Parse all snapshots into incremental dictionaries per namespace, tracking deletions. For each reference, first validate syntax; if invalid, emit invalid tuple. For valid references, if location is given, treat as location\u2011authoritative: at each snapshot from start, look up key in its namespace; if present, update hash to current entry hash, else keep previous hash. For location\u2011less references, pre\u2011compute the list of candidate names by iterating over all prefixes of context (including empty) and appending the parsed name. For value references, maintain two ordered lists of candidate names: value candidates first, then function candidates. While processing snapshots in order, for each reference maintain a pointer to the first candidate that exists in the current snapshot. When a candidate is found, record its namespace (function may change namespace), location, and hash, and mark the reference as location\u2011authoritative for all subsequent snapshots. If no candidate is found by the last snapshot, emit missing tuple. Use a single pass over snapshots, updating per\u2011namespace dictionaries and per\u2011reference pointers. Complexity is O(total snapshots + total entries + total references + total candidate checks), which is linear in the input size.",
+    "data_structures": [
+      "dict of dicts for namespaces mapping (name, version)->hash",
+      "list of snapshots each containing dicts of updates",
+      "list of references with precomputed candidate lists",
+      "indices per reference to current candidate"
+    ],
+    "complexity_target": "O(N + M + K) where N=total snapshots, M=total entries/updates, K=total references + candidate checks",
+    "traps_to_handle": [
+      "syntax validation of terminal suffixes",
+      "handling deletions (hash=None)",
+      "value references priority order",
+      "maintaining location\u2011authoritative state across snapshots",
+      "avoiding materializing all candidate names at once"
+    ],
+    "python_signature": "def refresh_references(initial: List[Dict[str, Any]], snapshots: List[List[Dict[str, Any]]], references: List[Dict[str, Any]]) -> List[Tuple[str, str, Optional[str], Optional[str]]]:",
+    "return_shape": "List of tuples (status, namespace, location, hash) in the same order as references",
+    "test_ideas": [
+      "1. Reference with invalid terminal suffix \u2192 invalid\n2. Reference with location, key present in some snapshots \u2192 hash updates\n3. Reference with location, key missing \u2192 hash unchanged\n4. Location\u2011less type reference finds first candidate in context prefixes\n5. Value reference prefers value candidate, falls back to function\n6. Function reference changes namespace when matched\n7. Reference that never matches \u2192 missing\n8. Deletion of key in later snapshot does not affect already located reference\n9. Large number of snapshots with no updates to test linearity\n10. Mixed namespaces and versions to test parsing"
+    ],
+    "model": "openai/gpt-oss-20b",
+    "fallback": false,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "normal",
+    "prompt_tokens": 1254,
+    "completion_tokens": 1485,
+    "kind": "python"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": true,
+    "summary": "2/4 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "spec_empty",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "invalid terminal suffix",
+        "ok": false,
+        "detail": "TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+        "kind": "adversarial"
+      },
+      {
+        "name": "location\u2011less value reference finds first candidate",
+        "ok": false,
+        "detail": "TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "invalid terminal suffix: TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+      "location\u2011less value reference finds first candidate: TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'"
+    ]
+  },
+  "rust_verify": null,
+  "repairs": [],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 62.7,
+    "ok": true,
+    "slow": false,
+    "summary": "62.7ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "tool:read_problem",
+      "elapsed_s": 0.0,
+      "remaining_s": 300.0,
+      "detail": "loaded problem_04.json id=2beff58fa923\u2026",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "tool:analyze_constraints",
+      "elapsed_s": 0.001,
+      "remaining_s": 299.999,
+      "detail": "lang=python entrypoint=refresh_references difficulty=hard huge_bounds=2 traps=2",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 1.094,
+      "remaining_s": 298.906,
+      "detail": "Parse all snapshots into incremental dictionaries per namespace, tracking deletions. For each reference, first validate syntax; if invalid, emit invalid tuple. ",
+      "extra": {
+        "model": "openai/gpt-oss-20b",
+        "fallback": false
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 27.125,
+      "remaining_s": 272.875,
+      "detail": "python chars=5659 model=openai/gpt-oss-120b tier=normal",
+      "extra": {
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "normal",
+        "prompt_tokens": 1254,
+        "completion_tokens": 1485,
+        "kind": "python"
+      }
+    },
+    {
+      "stage": "tool:generate_tests",
+      "elapsed_s": 27.837,
+      "remaining_s": 272.163,
+      "detail": "prepared 4 tests (2 adversarial)",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "tool:run_solution",
+      "elapsed_s": 27.938,
+      "remaining_s": 272.062,
+      "detail": "2/4 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true
+      }
+    },
+    {
+      "stage": "tool:benchmark_solution",
+      "elapsed_s": 28.001,
+      "remaining_s": 271.999,
+      "detail": "62.7ms over 2 cases",
+      "extra": {
+        "used": true
+      }
+    }
+  ]
+}

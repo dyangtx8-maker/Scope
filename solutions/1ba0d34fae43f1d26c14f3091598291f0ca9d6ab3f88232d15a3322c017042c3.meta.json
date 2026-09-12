@@ -1,0 +1,389 @@
+{
+  "phase": 3,
+  "problem_id": "1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3",
+  "source": "samples/1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3.py",
+  "target_language": "python",
+  "verified": false,
+  "python_verified": false,
+  "rust_verified": null,
+  "elapsed_s": 52.778,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 7226,
+    "completion_tokens": 16164,
+    "calls": 6,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 4
+    },
+    "by_provider": {
+      "gemini": 2,
+      "groq": 3,
+      "openai": 1
+    }
+  },
+  "analysis": {
+    "problem_id": "1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "simulate_writes",
+    "signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)",
+    "io_mode": "function",
+    "statement": "Simulate a congestion-aware virtual-adapter write worker with a shared spin-credit reservoir.\n\nDefine `simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)`.\n\n`lengths` is a list of packet lengths. A packet is valid exactly when its length is in `[1, 65535]`. Invalid packets make no attempt and change no shared state.\n\n`outcomes` is a run-length encoded chronological list of `(kind, count)` pairs. `kind` is `\"ok\"`, `\"full\"`, or `\"error\"`, and `count` is positive. Every write attempt consumes one outcome. After all runs are exhausted, every later attempt implicitly returns `\"error\"`.\n\nThe worker has a congestion level, initially zero and always in `[0, level_cap]`, and a spin-credit balance, initially `initial_credits` and always in `[0, credit_cap]`. Valid packets are processed in order:\n\n* `\"ok\"` sends the packet, decreases the level by one without going below zero, then adds the packet's length to the credit balance, capped at `credit_cap`.\n* `\"error\"` fails the packet and resets the level to zero. Credits are unchanged.\n* `\"full\"` raises the level by one, capped at `level_cap`. Let `old_level` be the level before this increase and l",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "Constraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`."
+    ],
+    "huge_bounds": [
+      "10**18",
+      "10**30",
+      "200,000"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: implicit",
+      "wording: exactly",
+      "wording: without going below"
+    ],
+    "algorithmic_traps": [
+      "algorithm: run-length"
+    ],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "return_hint": "dict",
+    "difficulty": "hard",
+    "proto_entrypoint": "simulate_writes",
+    "proto_signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)"
+  },
+  "plan": {
+    "approach": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.",
+    "data_structures": [
+      "dicts/lists sized by input",
+      "avoid dense grids"
+    ],
+    "complexity_target": "near-linear in the given input length",
+    "traps_to_handle": [
+      "algorithm: run-length",
+      "wording: implicit",
+      "wording: exactly",
+      "wording: without going below",
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "python_signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)",
+    "return_shape": "dict",
+    "test_ideas": [
+      "smallest legal input with a known expected value from the spec",
+      "invalid / implicit-error / boundary wording trap",
+      "a case that would explode if a huge bound is looped"
+    ],
+    "model": "gemini-2.5-flash-lite",
+    "fallback": true,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 952,
+    "completion_tokens": 8000,
+    "kind": "python",
+    "provider": "groq"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": false,
+    "summary": "2/5 local tests passed (3 hard failures)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "spec_empty",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "spec_invalid",
+        "ok": false,
+        "detail": "expected {'packets': [['INVALID', 0, 0, 0], ['INVALID', 0, 0, 0]], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 2, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}} got {'packets': [], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}}",
+        "kind": "spec"
+      },
+      {
+        "name": "spec_implicit_error",
+        "ok": false,
+        "detail": "expected {'packets': [['ERROR', 0, 0, 0]], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 1, 'invalid': 0, 'attempts': 1, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}} got {'packets': [], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}}",
+        "kind": "spec"
+      },
+      {
+        "name": "spec_one_ok",
+        "ok": false,
+        "detail": "expected {'packets': [['SENT', 0, 0, 0]], 'telemetry': {'sent': 1, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 1, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 3}} got {'packets': [], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}}",
+        "kind": "spec"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      }
+    ],
+    "hints": [
+      "spec_invalid: expected {'packets': [['INVALID', 0, 0, 0], ['INVALID', 0, 0, 0]], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 2, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}} got {'packets': [], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}}",
+      "spec_implicit_error: expected {'packets': [['ERROR', 0, 0, 0]], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 1, 'invalid': 0, 'attempts': 1, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}} got {'packets': [], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}}",
+      "spec_one_ok: expected {'packets': [['SENT', 0, 0, 0]], 'telemetry': {'sent': 1, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 1, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 3}} got {'packets': [], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}}"
+    ]
+  },
+  "rust_verify": null,
+  "repairs": [
+    {
+      "attempt": 1,
+      "ok": false,
+      "kept": true,
+      "summary": "1/5 local tests passed (4 hard failures)",
+      "model": "openai/gpt-oss-120b",
+      "tier": "strong"
+    },
+    {
+      "attempt": 2,
+      "ok": false,
+      "kept": true,
+      "summary": "2/5 local tests passed (3 hard failures)",
+      "model": "openai/gpt-oss-120b",
+      "tier": "strong"
+    },
+    {
+      "attempt": 3,
+      "ok": false,
+      "kept": true,
+      "summary": "2/5 local tests passed (3 hard failures)",
+      "model": "gpt-4.1-mini",
+      "tier": "strong"
+    }
+  ],
+  "benchmark": {
+    "used": false,
+    "reason": "skip benchmark while the solution still fails tests"
+  },
+  "events": [
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.01,
+      "remaining_s": 299.99,
+      "detail": "loaded 1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3.json id=1ba0d34fae43\u2026",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "lang=python entrypoint=simulate_writes difficulty=hard huge_bounds=3 traps=4",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 5.197,
+      "remaining_s": 294.803,
+      "detail": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays",
+      "extra": {
+        "model": "gemini-2.5-flash-lite",
+        "fallback": true,
+        "node": "plan"
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 22.856,
+      "remaining_s": 277.144,
+      "detail": "python chars=971 model=openai/gpt-oss-120b tier=strong provider=groq",
+      "extra": {
+        "node": "generate",
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 952,
+        "completion_tokens": 8000,
+        "kind": "python",
+        "provider": "groq"
+      }
+    },
+    {
+      "stage": "tests",
+      "elapsed_s": 27.522,
+      "remaining_s": 272.478,
+      "detail": "prepared 5 tests (0 adversarial)",
+      "extra": {
+        "used": true,
+        "node": "tests"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 27.522,
+      "remaining_s": 272.478,
+      "detail": "syntax error: invalid syntax (<unknown>, line 1)",
+      "extra": {
+        "used": true,
+        "ok": false,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 27.523,
+      "remaining_s": 272.477,
+      "detail": "1 repair hints",
+      "extra": {
+        "used": true,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 27.523,
+      "remaining_s": 272.477,
+      "detail": "attempt 1/3",
+      "extra": {
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 32.406,
+      "remaining_s": 267.594,
+      "detail": "1/5 local tests passed (4 hard failures)",
+      "extra": {
+        "ok": false,
+        "repair": 1,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 32.526,
+      "remaining_s": 267.474,
+      "detail": "1/5 local tests passed (4 hard failures)",
+      "extra": {
+        "used": true,
+        "ok": false,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 32.526,
+      "remaining_s": 267.474,
+      "detail": "4 repair hints",
+      "extra": {
+        "used": true,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 32.526,
+      "remaining_s": 267.474,
+      "detail": "attempt 2/3",
+      "extra": {
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 40.153,
+      "remaining_s": 259.847,
+      "detail": "2/5 local tests passed (3 hard failures)",
+      "extra": {
+        "ok": false,
+        "repair": 2,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 40.275,
+      "remaining_s": 259.725,
+      "detail": "2/5 local tests passed (3 hard failures)",
+      "extra": {
+        "used": true,
+        "ok": false,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 40.276,
+      "remaining_s": 259.724,
+      "detail": "3 repair hints",
+      "extra": {
+        "used": true,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 40.276,
+      "remaining_s": 259.724,
+      "detail": "attempt 3/3",
+      "extra": {
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 52.657,
+      "remaining_s": 247.343,
+      "detail": "2/5 local tests passed (3 hard failures)",
+      "extra": {
+        "ok": false,
+        "repair": 3,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 52.776,
+      "remaining_s": 247.224,
+      "detail": "2/5 local tests passed (3 hard failures)",
+      "extra": {
+        "used": true,
+        "ok": false,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 52.777,
+      "remaining_s": 247.223,
+      "detail": "skipped: skip benchmark while the solution still fails tests",
+      "extra": {
+        "used": false,
+        "node": "write"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 52.778,
+      "remaining_s": 247.222,
+      "detail": "1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3.py verified=False",
+      "extra": {
+        "node": "write"
+      }
+    }
+  ],
+  "graph": "langgraph"
+}

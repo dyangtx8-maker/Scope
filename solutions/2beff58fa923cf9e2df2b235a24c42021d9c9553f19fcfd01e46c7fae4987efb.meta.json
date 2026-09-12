@@ -1,0 +1,285 @@
+{
+  "phase": 3,
+  "problem_id": "2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb",
+  "source": "samples/2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb.py",
+  "target_language": "python",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": null,
+  "elapsed_s": 31.269,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 2929,
+    "completion_tokens": 10985,
+    "calls": 4,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 2
+    },
+    "by_provider": {
+      "gemini": 2,
+      "groq": 2
+    }
+  },
+  "analysis": {
+    "problem_id": "2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "refresh_references",
+    "signature": "refresh_references(initial, snapshots, references)",
+    "io_mode": "function",
+    "statement": "## Refresh temporally activated package-backed references\n\nImplement `refresh_references(initial, snapshots, references)` and return one tuple per reference, in input order:\n\n`(status, namespace, location, hash)`\n\n`status` is `\"invalid\"`, `\"missing\"`, or `\"located\"`.\n\nThe initial index is snapshot 0. Applying atomic batch `i` produces snapshot `i`. An entry has `namespace`, `name`, `version`, and nonempty opaque `hash`. An update has the same fields, but `hash=None` deletes its key. A key is `(namespace, name, version)`. Keys are unique within `initial` and within each batch. Namespaces are `\"type\"`, `\"function\"`, and `\"value\"`. Names are canonical dot-separated fully qualified names. Type versions are `None`; function/value versions are `None` or integers.\n\nA reference has `namespace`, `text`, `context`, `location`, `hash`, and `start`. `start` is an integer from 0 through `len(snapshots)`: the reference does not exist before that snapshot and is processed at `start` and every later snapshot. If `location` is `None`, `hash` is also `None`; otherwise both are canonical and nonempty respectively.\n\nIdentifiers contain only ASCII letters, digits, or `_`. Module identifiers and functio",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "All non-reference input obeys its canonical rules. There are at most 200,000 snapshots, entries, updates, and references each, and at most 1,000,000 induced candidate names. Use only the standard library, with no I/O or global state."
+    ],
+    "huge_bounds": [
+      "1,000,000",
+      "200,000"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: never processed",
+      "wording: location-authoritative"
+    ],
+    "algorithmic_traps": [],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "return_hint": "see statement",
+    "difficulty": "hard",
+    "proto_entrypoint": "refresh_references",
+    "proto_signature": "refresh_references(initial, snapshots, references)"
+  },
+  "plan": {
+    "approach": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.",
+    "data_structures": [
+      "dicts/lists sized by input",
+      "avoid dense grids"
+    ],
+    "complexity_target": "near-linear in the given input length",
+    "traps_to_handle": [
+      "wording: never processed",
+      "wording: location-authoritative",
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "python_signature": "refresh_references(initial, snapshots, references)",
+    "return_shape": "see statement",
+    "test_ideas": [
+      "smallest legal input with a known expected value from the spec",
+      "invalid / implicit-error / boundary wording trap",
+      "a case that would explode if a huge bound is looped"
+    ],
+    "model": "gemini-2.5-flash-lite",
+    "fallback": true,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 952,
+    "completion_tokens": 8000,
+    "kind": "python",
+    "provider": "groq"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": true,
+    "summary": "2/5 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "spec_empty",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "simple located reference",
+        "ok": false,
+        "detail": "TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+        "kind": "adversarial"
+      },
+      {
+        "name": "simple missing reference",
+        "ok": false,
+        "detail": "TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+        "kind": "adversarial"
+      },
+      {
+        "name": "function reference with version",
+        "ok": false,
+        "detail": "TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "simple located reference: TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+      "simple missing reference: TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'",
+      "function reference with version: TypeError: refresh_references() missing 2 required positional arguments: 'snapshots' and 'references'"
+    ]
+  },
+  "rust_verify": null,
+  "repairs": [
+    {
+      "attempt": 1,
+      "ok": true,
+      "kept": true,
+      "summary": "2/5 local tests passed (adversarial mismatches only)",
+      "model": "openai/gpt-oss-120b",
+      "tier": "strong"
+    }
+  ],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 58.26,
+    "ok": true,
+    "slow": false,
+    "summary": "58.26ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "loaded 2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb.json id=2beff58fa923\u2026",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "lang=python entrypoint=refresh_references difficulty=hard huge_bounds=2 traps=2",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 6.422,
+      "remaining_s": 293.578,
+      "detail": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays",
+      "extra": {
+        "model": "gemini-2.5-flash-lite",
+        "fallback": true,
+        "node": "plan"
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 25.556,
+      "remaining_s": 274.444,
+      "detail": "python chars=165 model=openai/gpt-oss-120b tier=strong provider=groq",
+      "extra": {
+        "node": "generate",
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 952,
+        "completion_tokens": 8000,
+        "kind": "python",
+        "provider": "groq"
+      }
+    },
+    {
+      "stage": "tests",
+      "elapsed_s": 27.8,
+      "remaining_s": 272.2,
+      "detail": "prepared 5 tests (3 adversarial)",
+      "extra": {
+        "used": true,
+        "node": "tests"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 27.801,
+      "remaining_s": 272.199,
+      "detail": "stub marker: NotImplementedError",
+      "extra": {
+        "used": true,
+        "ok": false,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 27.801,
+      "remaining_s": 272.199,
+      "detail": "2 repair hints",
+      "extra": {
+        "used": true,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 27.801,
+      "remaining_s": 272.199,
+      "detail": "attempt 1/3",
+      "extra": {
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 31.094,
+      "remaining_s": 268.906,
+      "detail": "2/5 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "ok": true,
+        "repair": 1,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 31.21,
+      "remaining_s": 268.79,
+      "detail": "2/5 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 31.269,
+      "remaining_s": 268.731,
+      "detail": "58.26ms over 2 cases",
+      "extra": {
+        "used": true,
+        "node": "write"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 31.27,
+      "remaining_s": 268.73,
+      "detail": "2beff58fa923cf9e2df2b235a24c42021d9c9553f19fcfd01e46c7fae4987efb.py verified=True",
+      "extra": {
+        "node": "write"
+      }
+    }
+  ],
+  "graph": "langgraph"
+}

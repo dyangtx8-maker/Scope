@@ -1,0 +1,213 @@
+{
+  "phase": 2,
+  "problem_id": "5cb294c18288f6ea4e50d59fd9831610232b6df28cc1a84b7d23e3d1eb5c7bb1",
+  "source": "problems/problem_06.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/problem_06.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/problem_06.py",
+  "target_language": "python",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": null,
+  "elapsed_s": 19.319,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 3068,
+    "completion_tokens": 7743,
+    "calls": 3,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 1
+    }
+  },
+  "analysis": {
+    "problem_id": "5cb294c18288f6ea4e50d59fd9831610232b6df28cc1a84b7d23e3d1eb5c7bb1",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "validate_build",
+    "signature": "validate_build(schemas, root, operations)",
+    "io_mode": "function",
+    "statement": "Implement `validate_build(schemas, root, operations)` for a binary-record builder containing schema-backed records and homogeneous arrays.\n\nA descriptor is:\n- `\"int\"` or `\"text\"`;\n- `(\"record\", s)` for schema index `s`;\n- `(\"array\", d, c)` for elements of descriptor `d` and capacity `c`.\n\n`schemas[s]` is a tuple of layout terms:\n- `(\"field\", name, d)` contributes one field;\n- `(\"repeat\", t, r)` contributes the complete flattened layout of earlier schema `t`, repeated `r` times.\n\nFlattening is recursive and order-preserving. Each schema references only smaller schema indices and has at least one flattened field. Flattened layouts may be enormous.\n\nThe builder starts with one open `(\"record\", root)`. Each operation affects the most recently opened, unclosed container:\n- `(\"put\", name, p)`, where `p` is `\"int\"` or `\"text\"`, inserts one value;\n- `(\"open\", name, d)`, where `d` is a record or array descriptor, inserts that value and opens it;\n- `(\"default\", k)` inserts default values into the next `k` positions without opening containers;\n- `(\"close\",)` closes the current container.\n\nFor an ordinary insertion into a record, an unfilled field must remain, and its name and descriptor must ",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "Constraints:",
+      "- At most `200_000` schemas and operations.",
+      "- At most `300_000` total layout terms and descriptor nodes.",
+      "- Names have length at most 40.",
+      "- Schema-reference and descriptor nesting are at most 60."
+    ],
+    "huge_bounds": [
+      "10^18"
+    ],
+    "materialization_risks": [
+      "materialization: enormous",
+      "materialization: flatten"
+    ],
+    "wording_traps": [
+      "wording: exactly"
+    ],
+    "algorithmic_traps": [
+      "algorithm: schema"
+    ],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays"
+    ],
+    "return_hint": "int",
+    "difficulty": "hard",
+    "proto_entrypoint": "validate_build",
+    "proto_signature": "validate_build(schemas, root, operations)"
+  },
+  "plan": {
+    "approach": "Use a stack of container states. Each state tracks the flattened layout iterator and a cursor. For records, precompute a lazy iterator over flattened fields using a generator that walks the schema layout on demand, yielding (name, descriptor). For arrays, store element descriptor and remaining capacity. Operations consume from the current state: put/put default advance cursor, open pushes new state, close pops. Descriptor equality is checked by a recursive function that compares descriptor tuples, caching results for repeated comparisons. Default handling checks that the next k flattened fields (for records) or capacity slots (for arrays) are primitive. All counts are handled with Python integers; no materialization of huge layouts. Complexity is O(total operations + total flattened fields accessed), bounded by input size.",
+    "data_structures": [
+      "stack of dicts with keys: type ('record'/'array'), layout_iter (generator for records), cursor (int), remaining_capacity (int for arrays), elem_desc (for arrays)"
+    ],
+    "complexity_target": "O(N + M) time, O(S) memory where N=operations, M=flattened fields accessed, S=stack depth (\u226460)",
+    "traps_to_handle": [
+      "materialization: avoid building full flattened list; use generators",
+      "wording: ensure exact name and descriptor match",
+      "algorithmic: recursive descriptor equality with caching",
+      "time_memory: handle 10^18 counts with Python ints, no loops over them"
+    ],
+    "python_signature": "def validate_build(schemas: list[tuple], root: int, operations: list[tuple]) -> int",
+    "return_shape": "int",
+    "test_ideas": [
+      "1. Simple record with two int fields, put both, close \u2013 expect 0.\n2. Record with repeat of another schema, test flattened order.\n3. Array of int with capacity 5, put 3, default 2, close \u2013 expect 0.\n4. Default on array with non-primitive element \u2013 expect invalid.\n5. Put with wrong name \u2013 expect index.\n6. Put into array with wrong descriptor \u2013 expect index.\n7. Close record before all fields \u2013 expect index.\n8. Operations after initial close \u2013 expect index.\n9. Large capacity array, default 10^18 \u2013 ensure no overflow.\n10. Nested repeats up to depth 60 \u2013 ensure recursion depth handled."
+    ],
+    "model": "openai/gpt-oss-20b",
+    "fallback": false,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 1096,
+    "completion_tokens": 6862,
+    "kind": "python"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": true,
+    "summary": "4/5 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "spec_unclosed",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "simple_record",
+        "ok": true,
+        "detail": "passed",
+        "kind": "adversarial"
+      },
+      {
+        "name": "array_with_default",
+        "ok": false,
+        "detail": "TypeError: unhashable type: 'list'",
+        "kind": "adversarial"
+      },
+      {
+        "name": "wrong_field_name",
+        "ok": true,
+        "detail": "passed",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "array_with_default: TypeError: unhashable type: 'list'"
+    ]
+  },
+  "rust_verify": null,
+  "repairs": [],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 63.72,
+    "ok": true,
+    "slow": false,
+    "summary": "63.72ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "tool:read_problem",
+      "elapsed_s": 0.0,
+      "remaining_s": 300.0,
+      "detail": "loaded problem_06.json id=5cb294c18288\u2026",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "tool:analyze_constraints",
+      "elapsed_s": 0.001,
+      "remaining_s": 299.999,
+      "detail": "lang=python entrypoint=validate_build difficulty=hard huge_bounds=1 traps=2",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 1.139,
+      "remaining_s": 298.861,
+      "detail": "Use a stack of container states. Each state tracks the flattened layout iterator and a cursor. For records, precompute a lazy iterator over flattened fields usi",
+      "extra": {
+        "model": "openai/gpt-oss-20b",
+        "fallback": false
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 18.297,
+      "remaining_s": 281.703,
+      "detail": "python chars=10658 model=openai/gpt-oss-120b tier=strong",
+      "extra": {
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 1096,
+        "completion_tokens": 6862,
+        "kind": "python"
+      }
+    },
+    {
+      "stage": "tool:generate_tests",
+      "elapsed_s": 19.126,
+      "remaining_s": 280.874,
+      "detail": "prepared 5 tests (3 adversarial)",
+      "extra": {
+        "used": true
+      }
+    },
+    {
+      "stage": "tool:run_solution",
+      "elapsed_s": 19.255,
+      "remaining_s": 280.745,
+      "detail": "4/5 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true
+      }
+    },
+    {
+      "stage": "tool:benchmark_solution",
+      "elapsed_s": 19.319,
+      "remaining_s": 280.681,
+      "detail": "63.72ms over 2 cases",
+      "extra": {
+        "used": true
+      }
+    }
+  ]
+}

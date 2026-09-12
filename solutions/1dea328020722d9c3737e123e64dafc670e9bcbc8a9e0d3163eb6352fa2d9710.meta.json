@@ -1,0 +1,254 @@
+{
+  "phase": 3,
+  "problem_id": "1dea328020722d9c3737e123e64dafc670e9bcbc8a9e0d3163eb6352fa2d9710",
+  "source": "samples/1dea328020722d9c3737e123e64dafc670e9bcbc8a9e0d3163eb6352fa2d9710.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/1dea328020722d9c3737e123e64dafc670e9bcbc8a9e0d3163eb6352fa2d9710.py",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/1dea328020722d9c3737e123e64dafc670e9bcbc8a9e0d3163eb6352fa2d9710.py",
+  "target_language": "python",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": null,
+  "elapsed_s": 15.912,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 3080,
+    "completion_tokens": 5252,
+    "calls": 3,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 1
+    },
+    "by_provider": {
+      "gemini": 2,
+      "groq": 1
+    }
+  },
+  "analysis": {
+    "problem_id": "1dea328020722d9c3737e123e64dafc670e9bcbc8a9e0d3163eb6352fa2d9710",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "track_indicator",
+    "signature": "track_indicator(initial_ids, selected_index, operations)",
+    "io_mode": "function",
+    "statement": "Define `track_indicator(initial_ids, selected_index, operations)`.\n\nThe state is an ordered tab strip whose tabs have distinct signed 64-bit integer identifiers. At most one tab is selected; its zero-based position is the indicator index.\n\n`initial_ids` is the initial order. If it is empty, `selected_index` is `-1`. Otherwise, `0 <= selected_index < len(initial_ids)`, and that position is initially selected.\n\nEach element of `operations` is one of:\n\n* `(\"insert\", p, ids)`: `ids` is a nonempty sequence of identifiers that have never appeared before, even as removed tabs. Insert them in their given order immediately before position `p`, where `0 <= p <= current_length`. An existing selection remains attached to the same identifier. If the strip was empty, the first inserted identifier becomes selected.\n* `(\"remove\", ids)`: `ids` is a nonempty sequence of pairwise distinct identifiers, all currently present. Remove them simultaneously. If the selected identifier survives, it remains selected. Otherwise, use the order immediately before this operation and disregard every removed tab other than the selected tab: select the first surviving tab to its right; if none exists, select the las",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "The state is an ordered tab strip whose tabs have distinct signed 64-bit integer identifiers. At most one tab is selected; its zero-based position is the indicator index.",
+      "All identifiers in `initial_ids` are distinct. There are at most 200,000 operations. The total number of identifiers in `initial_ids` and all `insert` operations is at most 300,000. The total number of identifiers listed by all `remove` ope"
+    ],
+    "huge_bounds": [
+      "200,000",
+      "300,000"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: simultaneously",
+      "wording: attached to the same identifier",
+      "wording: zero-based"
+    ],
+    "algorithmic_traps": [],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "return_hint": "list",
+    "difficulty": "hard",
+    "proto_entrypoint": "track_indicator",
+    "proto_signature": "track_indicator(initial_ids, selected_index, operations)"
+  },
+  "plan": {
+    "approach": "The problem involves maintaining an ordered list of identifiers with dynamic insertions, removals, and reversals, while also tracking a selected index. Given the constraints on the number of operations and identifiers, a naive list manipulation will be too slow. A balanced binary search tree or a similar data structure that supports efficient order statistics, insertions, deletions, and range reversals is required. A rope data structure or a splay tree could be suitable. We need to map identifiers to their current positions and vice-versa. For insertions, we need to find the position `p` and insert a sequence of new identifiers. For removals, we need to efficiently find and remove multiple identifiers, and then re-evaluate the selected index based on the survival and relative positions of remaining tabs. For reversals, we need to perform range reversals efficiently. The selected index needs to be updated after each operation. We can maintain the selected identifier and its current index separately. When identifiers are removed, we need to find the new selected index based on the rules. For `insert`, if the selected tab is before `p`, its index increases by the number of inserted tabs. If it's at or after `p`, its index remains the same. If the strip was empty and an insert happens, the first inserted tab becomes selected. For `remove`, if the selected tab is removed, we need to find the next or previous surviving tab. For `reverse`, the selected index remains the same if the selected tab is within the reversed range, otherwise it is unaffected.",
+    "data_structures": [
+      "A balanced binary search tree (e.g., an order statistic tree or a splay tree) to represent the ordered tab strip, allowing for efficient insertion, deletion, and range reversal. Each node in the tree would store an identifier and potentially subtree size for order statistics.",
+      "A hash map (dictionary in Python) to quickly map identifiers to their corresponding nodes in the tree, facilitating fast lookups for removals and updates.",
+      "A variable to store the currently selected identifier and its current index."
+    ],
+    "complexity_target": "Near-linear time complexity O(N log N) or O(N) where N is the total number of identifiers, considering the total number of operations and identifiers. Each operation should ideally be O(log N) or amortized O(log N).",
+    "traps_to_handle": [
+      "Simultaneous removals: Ensure all specified identifiers are removed logically before re-evaluating the selected index.",
+      "Selection logic for removals: Carefully implement the rules for selecting the next tab (right, then left, then none) when the current selection is removed.",
+      "Zero-based indexing: Consistently use zero-based indexing for positions and the selected index.",
+      "Identifier uniqueness: Ensure new identifiers in 'insert' operations are indeed new and that identifiers in 'remove' operations are present.",
+      "Edge cases: Empty initial list, operations on an empty list, operations at the boundaries (left/right of the strip), reversing the entire strip.",
+      "Large number of identifiers and operations: Avoid naive list manipulations that would exceed time limits.",
+      "Maintaining selection during reversals: Ensure the selected identifier's position is correctly tracked after a range reversal."
+    ],
+    "python_signature": "def track_indicator(initial_ids: list[int], selected_index: int, operations: list[tuple]) -> list[int]:",
+    "return_shape": "A list of integers, where each integer is the selected index after each operation, or -1 if no tab is selected.",
+    "test_ideas": [
+      "Basic operations: Insert at beginning, middle, end. Remove from beginning, middle, end. Reverse a small range, a large range, the whole list.",
+      "Edge cases: Empty initial list, operations on an empty list, operations on a single-element list.",
+      "Selection tracking: Test all scenarios for selection changes during insert, remove, and reverse operations.",
+      "Multiple removals: Test removing multiple identifiers at once, including the selected one and adjacent ones.",
+      "Complex sequences: A mix of insert, remove, and reverse operations to test interactions.",
+      "Large scale: Test with the maximum allowed number of identifiers and operations to check performance.",
+      "Identifier values: Test with positive, negative, and zero identifiers.",
+      "Insertions into empty list: Verify the first inserted element becomes selected.",
+      "Remove last element: Verify selection becomes -1.",
+      "Reverse entire list: Verify selection index is maintained correctly if the selected item is within the reversed range."
+    ],
+    "model": "gemini-2.5-flash-lite",
+    "fallback": false,
+    "emit_rust": false
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 1325,
+    "completion_tokens": 3926,
+    "kind": "python",
+    "provider": "groq"
+  },
+  "generate_rust": {},
+  "verify": {
+    "ok": true,
+    "summary": "3/6 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "spec_no_ops_empty",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "spec_insert_empty",
+        "ok": true,
+        "detail": "passed",
+        "kind": "spec"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "Basic insert and remove",
+        "ok": false,
+        "detail": "expected [1, 0, 0] got [2, 2]",
+        "kind": "adversarial"
+      },
+      {
+        "name": "Remove selected, then right, then left",
+        "ok": false,
+        "detail": "expected [0, 1, 0, -1] got [1, 0, 0]",
+        "kind": "adversarial"
+      },
+      {
+        "name": "Reverse entire list",
+        "ok": false,
+        "detail": "expected [0] got [2]",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "Basic insert and remove: expected [1, 0, 0] got [2, 2]",
+      "Remove selected, then right, then left: expected [0, 1, 0, -1] got [1, 0, 0]",
+      "Reverse entire list: expected [0] got [2]"
+    ]
+  },
+  "rust_verify": null,
+  "repairs": [],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 65.56,
+    "ok": true,
+    "slow": false,
+    "summary": "65.56ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.01,
+      "remaining_s": 299.99,
+      "detail": "loaded 1dea328020722d9c3737e123e64dafc670e9bcbc8a9e0d3163eb6352fa2d9710.json id=1dea32802072\u2026",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "lang=python entrypoint=track_indicator difficulty=hard huge_bounds=2 traps=3",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 5.084,
+      "remaining_s": 294.916,
+      "detail": "The problem involves maintaining an ordered list of identifiers with dynamic insertions, removals, and reversals, while also tracking a selected index. Given th",
+      "extra": {
+        "model": "gemini-2.5-flash-lite",
+        "fallback": false,
+        "node": "plan"
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 13.664,
+      "remaining_s": 286.336,
+      "detail": "python chars=6490 model=openai/gpt-oss-120b tier=strong provider=groq",
+      "extra": {
+        "node": "generate",
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 1325,
+        "completion_tokens": 3926,
+        "kind": "python",
+        "provider": "groq"
+      }
+    },
+    {
+      "stage": "tests",
+      "elapsed_s": 15.671,
+      "remaining_s": 284.329,
+      "detail": "prepared 6 tests (3 adversarial)",
+      "extra": {
+        "used": true,
+        "node": "tests"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 15.845,
+      "remaining_s": 284.155,
+      "detail": "3/6 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 15.912,
+      "remaining_s": 284.088,
+      "detail": "65.56ms over 2 cases",
+      "extra": {
+        "used": true,
+        "node": "write"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 15.912,
+      "remaining_s": 284.088,
+      "detail": "1dea328020722d9c3737e123e64dafc670e9bcbc8a9e0d3163eb6352fa2d9710.py verified=True",
+      "extra": {
+        "node": "write"
+      }
+    }
+  ],
+  "graph": "langgraph"
+}

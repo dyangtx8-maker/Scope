@@ -1,0 +1,319 @@
+{
+  "phase": 3,
+  "problem_id": "1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0",
+  "source": "samples/1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0.json",
+  "solution": "/Users/yash.d/code/ChallengeBox/solutions/1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0.rs",
+  "prototype": "/Users/yash.d/code/ChallengeBox/solutions/1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0.py",
+  "target_language": "rust",
+  "verified": true,
+  "python_verified": true,
+  "rust_verified": true,
+  "elapsed_s": 65.143,
+  "deadline_s": 300.0,
+  "usage": {
+    "prompt_tokens": 4044,
+    "completion_tokens": 13368,
+    "calls": 5,
+    "by_tier": {
+      "cheap": 2,
+      "strong": 3
+    },
+    "by_provider": {
+      "gemini": 2,
+      "groq": 2,
+      "openai": 1
+    }
+  },
+  "analysis": {
+    "problem_id": "1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0",
+    "source_language": "rust",
+    "target_language": "rust",
+    "entrypoint": "main",
+    "signature": "fn main()",
+    "io_mode": "stdin",
+    "statement": "Subject: Framed delivery records for segmented text\n\nText arrives in source segments and is transmitted in byte-limited chunks. Each nonempty chunk also adds a framing header, so the transmission budget depends on where chunk boundaries occur.\n\nThe text consists of Unicode scalar values. Under UTF-8, a value uses 1 byte for U+0000..U+007F, 2 for U+0080..U+07FF, 3 for U+0800..U+FFFF, and 4 otherwise. Surrogates are invalid.\n\nFor each request, start a new transmission with no open chunk and process a consecutive character range from left to right:\n\n* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.\n* A chunk cannot cross a source-segment boundary. Reaching that boundary closes it.\n* Every nonempty chunk contributes exactly `H` additional wire bytes for its header. Headers do not count toward `C`.\n* The request budget `B` limits total wire bytes: payload bytes plus headers.\n* Before sending a character, include its payload width and, if it would begin a new chunk, one header. If this would exceed `B`, stop before that character. A header is never sent without at least one character.\n* Completing the requested range has cause `END`; every earlier stop has ",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.",
+      "Constraints:",
+      "`1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`."
+    ],
+    "huge_bounds": [
+      "10^18"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: exactly",
+      "wording: one-based"
+    ],
+    "algorithmic_traps": [],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "return_hint": "stdout tokens",
+    "difficulty": "hard",
+    "proto_entrypoint": "solve",
+    "proto_signature": "solve(stdin: str) -> str"
+  },
+  "plan": {
+    "approach": "Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never loop a 1e18 bound.",
+    "data_structures": [
+      "dicts/lists sized by input",
+      "avoid dense grids"
+    ],
+    "complexity_target": "near-linear in the given input length",
+    "traps_to_handle": [
+      "wording: exactly",
+      "wording: one-based",
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "python_signature": "solve(stdin: str) -> str",
+    "return_shape": "stdout tokens",
+    "test_ideas": [
+      "smallest legal input with a known expected value from the spec",
+      "invalid / implicit-error / boundary wording trap",
+      "a case that would explode if a huge bound is looped"
+    ],
+    "model": "gemini-2.5-flash-lite",
+    "fallback": true,
+    "emit_rust": true
+  },
+  "generate": {
+    "model": "openai/gpt-oss-120b",
+    "fallback": false,
+    "tier": "strong",
+    "prompt_tokens": 934,
+    "completion_tokens": 7183,
+    "kind": "python",
+    "provider": "groq"
+  },
+  "generate_rust": {
+    "model": "gpt-4.1-mini",
+    "fallback": true,
+    "tier": "strong",
+    "prompt_tokens": 1111,
+    "completion_tokens": 3853,
+    "kind": "rust",
+    "provider": "openai"
+  },
+  "verify": {
+    "ok": true,
+    "summary": "2/5 local tests passed (adversarial mismatches only)",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [
+      {
+        "name": "empty_stdin",
+        "ok": true,
+        "detail": "passed",
+        "kind": "smoke"
+      },
+      {
+        "name": "trap_no_huge_loop",
+        "ok": true,
+        "detail": "no obvious huge-range loop",
+        "kind": "static_trap"
+      },
+      {
+        "name": "simple case with one chunk",
+        "ok": false,
+        "detail": "expected '8 10 8 1 8 END' got ''",
+        "kind": "adversarial"
+      },
+      {
+        "name": "case hitting budget limit exactly",
+        "ok": false,
+        "detail": "expected '4 8 4 1 4 LIMIT' got ''",
+        "kind": "adversarial"
+      },
+      {
+        "name": "case with multiple chunks and segment boundary",
+        "ok": false,
+        "detail": "expected '8 16 8 2 4 END' got ''",
+        "kind": "adversarial"
+      }
+    ],
+    "hints": [
+      "simple case with one chunk: expected '8 10 8 1 8 END' got ''",
+      "case hitting budget limit exactly: expected '4 8 4 1 4 LIMIT' got ''",
+      "case with multiple chunks and segment boundary: expected '8 16 8 2 4 END' got ''"
+    ]
+  },
+  "rust_verify": {
+    "ok": true,
+    "summary": "rust static ok",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": false,
+    "cases": [],
+    "hints": []
+  },
+  "repairs": [
+    {
+      "attempt": 1,
+      "ok": true,
+      "kept": true,
+      "summary": "2/5 local tests passed (adversarial mismatches only)",
+      "model": "openai/gpt-oss-120b",
+      "tier": "strong"
+    }
+  ],
+  "benchmark": {
+    "used": true,
+    "elapsed_ms": 59.1,
+    "ok": true,
+    "slow": false,
+    "summary": "59.1ms over 2 cases"
+  },
+  "events": [
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.01,
+      "remaining_s": 299.99,
+      "detail": "loaded 1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0.json id=1c182498c9c7\u2026",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "analyze",
+      "elapsed_s": 0.011,
+      "remaining_s": 299.989,
+      "detail": "lang=rust entrypoint=main difficulty=hard huge_bounds=1 traps=2",
+      "extra": {
+        "used": true,
+        "node": "analyze"
+      }
+    },
+    {
+      "stage": "plan",
+      "elapsed_s": 5.559,
+      "remaining_s": 294.441,
+      "detail": "Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never ",
+      "extra": {
+        "model": "gemini-2.5-flash-lite",
+        "fallback": true,
+        "node": "plan"
+      }
+    },
+    {
+      "stage": "generate",
+      "elapsed_s": 21.352,
+      "remaining_s": 278.648,
+      "detail": "python chars=147 model=openai/gpt-oss-120b tier=strong provider=groq",
+      "extra": {
+        "node": "generate",
+        "model": "openai/gpt-oss-120b",
+        "fallback": false,
+        "tier": "strong",
+        "prompt_tokens": 934,
+        "completion_tokens": 7183,
+        "kind": "python",
+        "provider": "groq"
+      }
+    },
+    {
+      "stage": "tests",
+      "elapsed_s": 23.614,
+      "remaining_s": 276.386,
+      "detail": "prepared 5 tests (3 adversarial)",
+      "extra": {
+        "used": true,
+        "node": "tests"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 23.615,
+      "remaining_s": 276.385,
+      "detail": "stub marker: NotImplementedError",
+      "extra": {
+        "used": true,
+        "ok": false,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 23.615,
+      "remaining_s": 276.385,
+      "detail": "2 repair hints",
+      "extra": {
+        "used": true,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "repair",
+      "elapsed_s": 23.615,
+      "remaining_s": 276.385,
+      "detail": "attempt 1/3",
+      "extra": {
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 27.802,
+      "remaining_s": 272.198,
+      "detail": "2/5 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "ok": true,
+        "repair": 1,
+        "node": "repair"
+      }
+    },
+    {
+      "stage": "verify",
+      "elapsed_s": 27.916,
+      "remaining_s": 272.084,
+      "detail": "2/5 local tests passed (adversarial mismatches only)",
+      "extra": {
+        "used": true,
+        "ok": true,
+        "node": "verify"
+      }
+    },
+    {
+      "stage": "emit_rust",
+      "elapsed_s": 65.083,
+      "remaining_s": 234.917,
+      "detail": "chars=16000 model=gpt-4.1-mini",
+      "extra": {
+        "node": "emit_rust",
+        "model": "gpt-4.1-mini",
+        "fallback": true,
+        "tier": "strong",
+        "prompt_tokens": 1111,
+        "completion_tokens": 3853,
+        "kind": "rust",
+        "provider": "openai"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 65.143,
+      "remaining_s": 234.857,
+      "detail": "59.1ms over 2 cases",
+      "extra": {
+        "used": true,
+        "node": "write"
+      }
+    },
+    {
+      "stage": "write",
+      "elapsed_s": 65.144,
+      "remaining_s": 234.856,
+      "detail": "1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0.rs verified=True",
+      "extra": {
+        "node": "write"
+      }
+    }
+  ],
+  "graph": "langgraph"
+}
