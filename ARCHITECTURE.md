@@ -4,6 +4,8 @@ This repo is an AI coding agent for trap-heavy algorithmic problems. The grader 
 
 The control loop is a small **LangGraph** state machine. The brains of each step stay in ordinary Python modules. There is no CrewAI and no extra agent swarm.
 
+![ChallengeBox agent architecture](docs/challengebox-architecture.png)
+
 ## Pipeline
 
 ```text
