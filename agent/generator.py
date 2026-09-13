@@ -38,7 +38,12 @@ def _rust_skeleton() -> str:
     )
 
 
-def generate_python(analysis: Analysis, plan: Plan, remaining_s: float) -> tuple[str, dict]:
+def generate_python(
+    analysis: Analysis,
+    plan: Plan,
+    remaining_s: float,
+    session_id: str = "",
+) -> tuple[str, dict]:
     fallback = _python_skeleton(analysis)
     if remaining_s < 20:
         return fallback, {"model": "local-skeleton", "fallback": True, "tier": "none"}
@@ -74,18 +79,28 @@ def generate_python(analysis: Analysis, plan: Plan, remaining_s: float) -> tuple
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+    started = time.monotonic()
     reply = chat(
         messages,
         tier=tier,
-        max_tokens=config.GENERATE_MAX_TOKENS,
+        remaining_s=remaining_s,
+        budget_usd=config.GENERATE_BUDGET_USD,
+        resume_session=session_id,
+        resumable=True,
         fallback_text=fallback,
     )
-    if reply.fallback and remaining_s > 40:
+    left = remaining_s - (time.monotonic() - started)
+    if reply.provider == "local" and left > 40:
+        # Nothing came back from the CLI at all: wait out a rate limit and try
+        # the normal tier once before settling for the local skeleton. The
+        # clock is re-read because the first attempt may have burned minutes.
         time.sleep(2.0)
         reply = chat(
             messages,
             tier="normal",
-            max_tokens=config.GENERATE_MAX_TOKENS,
+            remaining_s=left - 2.0,
+            budget_usd=config.GENERATE_BUDGET_USD,
+            resumable=True,
             fallback_text=fallback,
         )
     code = extract_code(reply.text, "python") or fallback
@@ -98,12 +113,20 @@ def generate_python(analysis: Analysis, plan: Plan, remaining_s: float) -> tuple
         "tier": reply.tier or tier,
         "prompt_tokens": reply.prompt_tokens,
         "completion_tokens": reply.completion_tokens,
+        "cost_usd": reply.cost_usd,
         "kind": "python",
         "provider": getattr(reply, "provider", ""),
+        "session_id": reply.session_id,
     }
 
 
-def generate_rust(analysis: Analysis, plan: Plan, prototype: str, remaining_s: float) -> tuple[str, dict]:
+def generate_rust(
+    analysis: Analysis,
+    plan: Plan,
+    prototype: str,
+    remaining_s: float,
+    session_id: str = "",
+) -> tuple[str, dict]:
     fallback = _rust_skeleton()
     if remaining_s < 25:
         return fallback, {"model": "local-skeleton", "fallback": True, "tier": "none", "kind": "rust"}
@@ -128,7 +151,10 @@ def generate_rust(analysis: Analysis, plan: Plan, prototype: str, remaining_s: f
             {"role": "user", "content": user},
         ],
         tier=tier,
-        max_tokens=config.GENERATE_MAX_TOKENS,
+        remaining_s=remaining_s,
+        budget_usd=config.GENERATE_BUDGET_USD,
+        resume_session=session_id,
+        resumable=True,
         fallback_text=fallback,
     )
     code = extract_code(reply.text, "rust") or fallback
@@ -140,11 +166,18 @@ def generate_rust(analysis: Analysis, plan: Plan, prototype: str, remaining_s: f
         "tier": reply.tier or tier,
         "prompt_tokens": reply.prompt_tokens,
         "completion_tokens": reply.completion_tokens,
+        "cost_usd": reply.cost_usd,
         "kind": "rust",
         "provider": getattr(reply, "provider", ""),
+        "session_id": reply.session_id,
     }
 
 
-def generate_solution(analysis: Analysis, plan: Plan, remaining_s: float) -> tuple[str, dict]:
+def generate_solution(
+    analysis: Analysis,
+    plan: Plan,
+    remaining_s: float,
+    session_id: str = "",
+) -> tuple[str, dict]:
     """Backward-compatible: Python solution or prototype."""
-    return generate_python(analysis, plan, remaining_s)
+    return generate_python(analysis, plan, remaining_s, session_id=session_id)

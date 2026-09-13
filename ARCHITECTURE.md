@@ -11,12 +11,12 @@ The control loop is a small **LangGraph** state machine. The brains of each step
 ```text
 problem JSON
   → analyze (local)
-  → plan (Gemini lite)
-  → generate (Groq 120b)
-  → tests (local spec + optional Gemini adversarial)
+  → plan (Claude Haiku 4.5)
+  → generate (Claude Sonnet 5, Opus 5 on hard problems)
+  → tests (local spec + optional Claude Haiku adversarial)
   → verify (local)
-       ├─ fail + time left → repair (Groq) → verify
-       ├─ Rust target → emit fn main() (Groq)
+       ├─ fail + time left → repair (Claude, escalating tier) → verify
+       ├─ Rust target → emit fn main() (Claude)
        └─ write solutions/<name>.py or .rs + .meta.json
 ```
 
@@ -34,32 +34,82 @@ Keep-best repair (reject a worse rewrite) lives inside the repair node. Analyzer
 
 ## Model routing
 
-| Job | Provider | Model |
-|---|---|---|
-| Plan, adversarial test ideas | Gemini | `gemini-2.5-flash-lite` |
-| Python / Rust generation, repair | Groq | `openai/gpt-oss-120b` |
-| Groq 429 or empty | OpenAI | `gpt-4.1-mini` |
-| Trap extraction, spec tests, stub check, benchmark, disk write | none | local |
+Every tier is a Claude model and the only transport is the Claude Code CLI.
 
-Gemini is not used for final codegen. OpenAI is not used for plan/tests. `agent/models.py` tries: requested provider → Groq → OpenAI → local fallback text.
+| Job | Tier | Model | `--effort` |
+|---|---|---|---|
+| Plan, adversarial test ideas | cheap | `claude-haiku-4-5-20251001` | low |
+| Python / Rust generation, repair | normal | `claude-sonnet-5` | medium |
+| Hard problems, escalated repair | strong | `claude-opus-5` | high |
+| Trap extraction, spec tests, stub check, benchmark, disk write | — | local, no model | — |
 
-Keys (never logged): `GROQ_API_KEY`, `GROQ_API_KEY_2`, `GEMINI_API_KEY`, `OPENAI_API_KEY` in `.env`.
+Codegen never runs on the cheap tier. On failure `agent/models.py` walks the chain requested model → `claude-sonnet-5` → `claude-haiku-4-5` → local fallback text, and hands the rest of the chain to `claude --fallback-model` so plain overload is retried inside a single invocation.
+
+No key lives in this repo. The CLI authenticates itself (`claude login`, or `ANTHROPIC_API_KEY` / Bedrock / Vertex in the environment or `.env`); `.env` values starting with `ANTHROPIC_`, `AWS_` or `CLAUDE_CODE_USE_` are passed through to the child process and never logged.
+
+## The Claude CLI transport
+
+`agent/models.py` builds one argv, writes the prompt to the child's stdin and reads back the single JSON result object from `--output-format json`. The calls are hardened for unattended use:
+
+| Flag | Why |
+|---|---|
+| `--tools ""` | these calls are pure text generation; the child gets no filesystem, shell or network tools |
+| `--permission-prompts none` | nothing can block waiting for a human |
+| `--safe-mode`, `--strict-mcp-config` | a developer's CLAUDE.md, skills, hooks, plugins or MCP servers cannot change what the agent generates |
+| private empty `cwd` | no repo file or project memory leaks into the prompt |
+| explicit `--session-id` | a parent Claude Code process exports `CLAUDE_CODE_SESSION_ID`; an inherited id must never become resumable |
+| `--json-schema` | plan and adversarial-test JSON is validated by the CLI and returned as `structured_output` |
+| `--max-budget-usd` | per-stage spend guardrail, the CLI-era replacement for `max_tokens` |
+| `--effort` | the replacement for the old provider `reasoning_effort`, stepped down one notch when under `EFFORT_DOWNGRADE_S` |
+| `--fallback-model` | overload retries happen inside one invocation |
+
+`stdout` is parsed line by line: the CLI can print a diagnostic line (for example `[claude-code:unrecognized_model] …`) before the result object, and a failure can arrive as `is_error: true` with `subtype: "success"`, so both are checked explicitly.
+
+**Session reuse.** Generation runs in a session this process names. Repair and Rust emission resume it with `--resume … --fork-session`, so the model still has the statement and its own earlier code in context, the prompt cache stays warm, and a rejected repair cannot corrupt the branch it came from. Only session ids minted in this process may be resumed. If a resume fails the call is retried once as a fresh conversation, and the repair prompt is self-contained either way.
+
+**Structured output beats prompted JSON.** Asking for "a JSON object only" in the
+prompt is not reliable through the CLI: on a same-prompt comparison the schema run
+returned a usable plan for $0.068 while the prompt-only run returned text this repo
+could not parse, for $0.098, in the same wall clock. Both JSON stages therefore ship
+a schema, and `chat()` still falls back to prompted JSON if the CLI ever rejects one.
+
+**Timeouts.** Every call is bounded by `min(CLI_TIMEOUT_S, remaining - RESERVE_S)`. Under `CLI_MIN_CALL_S` the stage does not call a model at all and takes its local fallback, so the writer always keeps its reserve. A CLI turn costs process start-up plus thinking time, so `LATE_PHASE_S` (70s), `MIN_REPAIR_S` (60s) and `ADVERSARIAL_MIN_S` (90s) were raised from their HTTP-era values: each one now has to cover a whole round trip, not a fast API call.
+
+## Measured behaviour
+
+Two sample runs on this transport, 300s deadline each, Claude CLI 2.1.270:
+
+| Problem | Models used | Wall clock | Cost | Local verdict |
+|---|---|---|---|---|
+| `problem_01`, python, hard | haiku ×2, opus ×1 | 229s | $0.20 | 8/8 local tests, `verified=true` |
+| `problem_02`, rust, hard | haiku ×1, opus ×1 (timed out), sonnet ×2 | 247s | $0.12 | Rust program emitted, prototype missed one spec case |
+
+The second run is the fallback ladder doing its job: the Opus generate attempt hit
+the 120s cap, `generate_python` saw a local fallback with time still on the clock,
+retried on the normal tier, and Sonnet produced the prototype and the `fn main()`.
+
+A CLI turn costs far more wall clock than the HTTP call it replaced - 20s to 140s
+here against seconds - so a 300s deadline buys roughly two or three model turns.
+That is what the raised `LATE_PHASE_S`, `MIN_REPAIR_S` and `ADVERSARIAL_MIN_S`
+thresholds are for: the budget goes into one good candidate instead of repair
+rounds that cannot finish. Both runs still wrote a solution well inside the
+deadline.
 
 ## Stages
 
 **Analyze** (`agent/analyzer.py`). No LLM. Parses entrypoint, Python vs Rust, huge bounds (`10**18`, `200,000`, …), materialization warnings, wording traps, and a difficulty tag.
 
-**Plan** (`agent/planner.py`). Cheap Gemini JSON: approach, structures, complexity target, traps, test ideas. Falls back to a local heuristic plan.
+**Plan** (`agent/planner.py`). Cheap-tier Claude JSON, validated against `PLAN_SCHEMA` by `claude --json-schema`: approach, structures, complexity target, traps, test ideas. Falls back to a local heuristic plan.
 
 **Generate** (`agent/generator.py`). Python stdlib function named by the spec. Rust samples first get a Python `solve(stdin) -> str` prototype, then a `fn main()` program.
 
-**Tests** (`agent/verifier.py` + `GenerateTestsTool`). Spec cases with expected values derived from the statement (empty, invalid, implicit error, …). Optional adversarial cases from Gemini. Adversarial mismatches are **soft** so a wrong LLM expected value cannot fail a spec-correct solution.
+**Tests** (`agent/verifier.py` + `GenerateTestsTool`). Spec cases with expected values derived from the statement (empty, invalid, implicit error, …). Optional adversarial cases from the cheap Claude tier. Adversarial mismatches are **soft** so a wrong LLM expected value cannot fail a spec-correct solution.
 
 **Verify**. Syntax, required entrypoint, stub/echo rejection, subprocess run with timeout, expected-value compare. Static ban on `range(10**18)`-style loops.
 
-**Repair**. Up to 3 attempts. Keep the higher-scoring candidate. Near the deadline (`LATE_PHASE_S` / `MIN_REPAIR_S`), skip more LLM work and write whatever is best.
+**Repair**. Up to 3 attempts, resuming the generation session. Keep the higher-scoring candidate. Near the deadline (`LATE_PHASE_S` / `MIN_REPAIR_S`), skip more LLM work and write whatever is best.
 
-**Write**. Always emits a file before the clock hits `RESERVE_S`. `.meta.json` records traps, plan, usage by provider/tier, graph node names, and every timed event.
+**Write**. Always emits a file before the clock hits `RESERVE_S`. `.meta.json` records traps, plan, usage by model/tier, the dollar cost the CLI reported, graph node names, and every timed event.
 
 ## Tools
 
@@ -77,7 +127,7 @@ Generic `Tool` interface in `agent/tools.py`. The graph decides `should_use`:
 `deadline_s` from the problem JSON (300s on samples) is first-class. Logs look like:
 
 ```text
-[  21.80s | rem  278.20s] generate: python chars=8619 model=openai/gpt-oss-120b provider=groq
+[  21.80s | rem  278.20s] generate: python chars=8619 model=claude-sonnet-5 tier=normal provider=claude-cli cost=$0.0412
 ```
 
 ## Repository layout
@@ -91,9 +141,9 @@ agent/planner.py         structured plan
 agent/generator.py       Python / Rust codegen
 agent/verifier.py        tests + stubs
 agent/repair.py          failure → rewrite
-agent/models.py          Gemini / Groq / OpenAI
+agent/models.py          Claude CLI transport, routing, usage/cost meter
 agent/tools.py           observable tools
-agent/config.py          models, timeouts, repair limits
+agent/config.py          models, CLI flags, timeouts, spend caps, repair limits
 samples/                 original challenge JSON
 problems/                numbered copies of the same fixtures
 solutions/               generated code + .meta.json
@@ -109,8 +159,13 @@ tests/test_architecture.py
 ## Run
 
 ```bash
+npm install -g @anthropic-ai/claude-code   # the `claude` binary this agent shells out to
+claude login                               # or export ANTHROPIC_API_KEY
 pip3 install -r requirements.txt
-python3 tests/test_architecture.py
+python3 solve.py --check                   # one tiny call proves the CLI is wired up
+python3 tests/test_architecture.py         # offline: no CLI, no network
 python3 solve.py samples/<id>.json
 python3 solve.py --all
 ```
+
+Without the `claude` binary the agent still runs end to end: every stage takes its local fallback and writes a heuristic solution, and `solve.py` says so on startup.

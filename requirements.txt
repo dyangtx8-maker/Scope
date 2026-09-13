@@ -1,1 +1,4 @@
+# Python dependencies. The models are reached through the Claude Code CLI
+# (`npm install -g @anthropic-ai/claude-code`), not through a provider SDK,
+# so there is no HTTP client or model library here.
 langgraph>=0.2,<1.0

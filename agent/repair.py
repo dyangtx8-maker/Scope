@@ -17,6 +17,7 @@ def repair_solution(
     remaining_s: float,
     attempt: int = 0,
     language: str = "python",
+    session_id: str = "",
 ) -> tuple[str, dict]:
     if remaining_s < config.MIN_REPAIR_S:
         return code, {"skipped": True, "reason": "deadline too close"}
@@ -55,7 +56,10 @@ def repair_solution(
             },
         ],
         tier=tier,
-        max_tokens=config.REPAIR_MAX_TOKENS,
+        remaining_s=remaining_s,
+        budget_usd=config.REPAIR_BUDGET_USD,
+        resume_session=session_id,
+        resumable=True,
         fallback_text=code,
     )
     repaired = extract_code(reply.text, lang) or code
@@ -67,5 +71,8 @@ def repair_solution(
         "tier": reply.tier or tier,
         "prompt_tokens": reply.prompt_tokens,
         "completion_tokens": reply.completion_tokens,
+        "cost_usd": reply.cost_usd,
+        "provider": reply.provider,
+        "session_id": reply.session_id,
         "previous_summary": report.summary,
     }

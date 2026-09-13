@@ -7,7 +7,7 @@ from typing import Any
 
 from . import config
 from .analyzer import Analysis
-from .models import chat, choose_tier, extract_json
+from .models import chat, choose_tier, reply_json
 
 
 @dataclass
@@ -22,9 +22,25 @@ class Plan:
     model: str = ""
     fallback: bool = False
     emit_rust: bool = False
+    cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "approach": {"type": "string"},
+        "data_structures": {"type": "array", "items": {"type": "string"}},
+        "complexity_target": {"type": "string"},
+        "traps_to_handle": {"type": "array", "items": {"type": "string"}},
+        "python_signature": {"type": "string"},
+        "return_shape": {"type": "string"},
+        "test_ideas": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["approach", "traps_to_handle", "test_ideas"],
+}
 
 
 def _heuristic_plan(analysis: Analysis) -> Plan:
@@ -111,14 +127,17 @@ def plan_solution(analysis: Analysis, remaining_s: float) -> Plan:
             },
         ],
         tier=tier,
-        max_tokens=config.PLAN_MAX_TOKENS,
+        remaining_s=remaining_s,
         json_mode=True,
+        json_schema=PLAN_SCHEMA,
+        budget_usd=config.PLAN_BUDGET_USD,
         fallback_text="",
     )
-    data = extract_json(reply.text)
+    data = reply_json(reply)
     if not data:
         fallback.model = reply.model
         fallback.fallback = True
+        fallback.cost_usd = reply.cost_usd
         return fallback
 
     def _list(value: Any) -> list[str]:
@@ -139,4 +158,5 @@ def plan_solution(analysis: Analysis, remaining_s: float) -> Plan:
         model=reply.model,
         fallback=reply.fallback,
         emit_rust=analysis.target_language == "rust",
+        cost_usd=reply.cost_usd,
     )

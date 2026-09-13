@@ -1,17 +1,44 @@
-"""LLM access: Gemini cheap, Groq codegen, OpenAI fallback."""
+"""Model access through the Claude Code CLI.
+
+Every tier is a Claude model reached by shelling out to `claude -p`:
+
+    cheap   -> claude-haiku-4-5   plan, adversarial test ideas
+    normal  -> claude-sonnet-5    Python / Rust generation, repair
+    strong  -> claude-opus-5      hard problems, escalated repair
+
+The CLI owns authentication, overload fallback (`--fallback-model`), prompt
+caching and session storage, so this module only has to build an argv, feed
+the prompt on stdin, and read back the single JSON result object.
+
+Calls are hardened for unattended use:
+
+* `--tools ""` so the child cannot touch the filesystem or the network,
+* `--permission-prompts none` so nothing can block on a prompt,
+* `--safe-mode` + `--strict-mcp-config` so a developer's CLAUDE.md, skills,
+  hooks or MCP servers cannot change what this agent generates,
+* an explicit `--session-id` per call, because a parent Claude Code process
+  exports CLAUDE_CODE_SESSION_ID and the child would otherwise inherit it,
+* a private empty working directory, so no project context leaks in.
+"""
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
-import urllib.error
-import urllib.request
+import uuid
 from dataclasses import dataclass, field
-from typing import Any
-from urllib.parse import urlencode
+from pathlib import Path
+from typing import Any, Optional
 
 from . import config
+
+load_env = config.load_env
 
 
 @dataclass
@@ -23,31 +50,52 @@ class ModelReply:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     provider: str = ""
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cost_usd: float = 0.0
+    session_id: str = ""
+    structured: Optional[dict[str, Any]] = None
+    duration_ms: int = 0
+    error: str = ""
 
 
 @dataclass
 class UsageMeter:
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cost_usd: float = 0.0
     calls: int = 0
     by_tier: dict[str, int] = field(default_factory=dict)
     by_provider: dict[str, int] = field(default_factory=dict)
+    by_model: dict[str, int] = field(default_factory=dict)
 
     def add(self, reply: ModelReply) -> None:
         self.prompt_tokens += reply.prompt_tokens
         self.completion_tokens += reply.completion_tokens
+        self.cache_read_tokens += reply.cache_read_tokens
+        self.cache_creation_tokens += reply.cache_creation_tokens
+        self.cost_usd = round(self.cost_usd + reply.cost_usd, 6)
         self.calls += 1
-        self.by_tier[reply.tier or "unknown"] = self.by_tier.get(reply.tier or "unknown", 0) + 1
+        tier = reply.tier or "unknown"
+        self.by_tier[tier] = self.by_tier.get(tier, 0) + 1
         provider = reply.provider or "unknown"
         self.by_provider[provider] = self.by_provider.get(provider, 0) + 1
+        model = reply.model or "unknown"
+        self.by_model[model] = self.by_model.get(model, 0) + 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "cost_usd": round(self.cost_usd, 6),
             "calls": self.calls,
             "by_tier": dict(self.by_tier),
             "by_provider": dict(self.by_provider),
+            "by_model": dict(self.by_model),
         }
 
 
@@ -57,36 +105,16 @@ USAGE = UsageMeter()
 def reset_usage() -> None:
     USAGE.prompt_tokens = 0
     USAGE.completion_tokens = 0
+    USAGE.cache_read_tokens = 0
+    USAGE.cache_creation_tokens = 0
+    USAGE.cost_usd = 0.0
     USAGE.calls = 0
     USAGE.by_tier.clear()
     USAGE.by_provider.clear()
+    USAGE.by_model.clear()
 
 
-def load_env(path=config.ENV_PATH) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        env[key.strip()] = value.strip()
-    return env
-
-
-def _env_key(*names: str) -> str:
-    env = load_env()
-    for name in names:
-        value = env.get(name)
-        if value:
-            return value
-    return ""
-
-
-def _groq_keys() -> list[str]:
-    env = load_env()
-    return [env[name] for name in ("GROQ_API_KEY", "GROQ_API_KEY_2") if env.get(name)]
+# --------------------------------------------------------------- routing
 
 
 def model_for(tier: str) -> str:
@@ -97,16 +125,30 @@ def model_for(tier: str) -> str:
     return config.NORMAL_MODEL
 
 
-def provider_for(tier: str) -> str:
-    if tier == "cheap":
-        return config.CHEAP_PROVIDER
-    if tier == "strong":
-        return config.STRONG_PROVIDER
-    return config.NORMAL_PROVIDER
+def provider_for(tier: str) -> str:  # noqa: ARG001 - one provider, kept for meta
+    return config.PROVIDER
+
+
+def model_chain(tier: str) -> list[str]:
+    """Requested model first, then cheaper survivors, without duplicates."""
+    chain: list[str] = []
+    for model in (model_for(tier), config.FALLBACK_MODEL, config.NORMAL_MODEL, config.CHEAP_MODEL):
+        if model and model not in chain:
+            chain.append(model)
+    return chain
+
+
+def effort_for(tier: str, remaining_s: float = 0.0) -> str:
+    """`claude --effort` for a tier, stepped down when the clock is short."""
+    effort = config.EFFORT_BY_TIER.get(tier, "low")
+    ladder = config.EFFORT_LADDER
+    if remaining_s and remaining_s < config.EFFORT_DOWNGRADE_S and effort in ladder:
+        effort = ladder[max(0, ladder.index(effort) - 1)]
+    return effort
 
 
 def choose_tier(stage: str, difficulty: str, remaining_s: float, repair_attempt: int = 0) -> str:
-    """Cost-aware routing. Codegen never uses the Gemini cheap tier."""
+    """Cost-aware routing. Codegen never uses the cheap tier."""
     if stage in {"plan", "tests"}:
         return "cheap"
     if stage == "generate":
@@ -120,286 +162,386 @@ def choose_tier(stage: str, difficulty: str, remaining_s: float, repair_attempt:
     return "cheap"
 
 
-def _extract_openai_text(payload: dict[str, Any]) -> str:
-    choices = payload.get("choices") or [{}]
-    message = (choices[0] or {}).get("message") or {}
-    content = message.get("content")
-    if isinstance(content, str) and content.strip():
-        return content
-    reasoning = message.get("reasoning")
-    if isinstance(reasoning, str) and reasoning.strip():
-        return reasoning
+def call_timeout(remaining_s: float) -> float:
+    """How long one CLI call may run without eating the write reserve."""
+    usable = float(remaining_s or 0.0) - config.RESERVE_S
+    if usable <= 0:
+        return 0.0
+    return min(config.CLI_TIMEOUT_S, usable)
+
+
+# --------------------------------------------------------------- transport
+
+_JSON_ONLY = (
+    "Reply with a single JSON object and nothing else: no prose, no markdown "
+    "fence, no trailing commentary."
+)
+
+_SCRUBBED_ENV = (
+    # A parent Claude Code process exports these; the child must not inherit
+    # a session id or an effort level we did not choose.
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+    "CLAUDE_EFFORT",
+)
+
+_PASSTHROUGH_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_CODE_USE_")
+
+_WORKDIR: Optional[str] = None
+_AVAILABLE: Optional[bool] = None
+# Session ids this process created. Only these may be resumed, so a session id
+# inherited from a parent Claude Code process can never be pulled into a call.
+_MINTED: set[str] = set()
+
+
+def resumable_session(session_id: str) -> bool:
+    return bool(session_id) and session_id in _MINTED
+
+
+def cli_available(refresh: bool = False) -> bool:
+    """True when the Claude CLI is on PATH."""
+    global _AVAILABLE
+    if refresh or _AVAILABLE is None:
+        _AVAILABLE = shutil.which(config.CLAUDE_BIN) is not None
+    return bool(_AVAILABLE)
+
+
+def _workdir() -> str:
+    """An empty directory, so no CLAUDE.md or repo file reaches the model."""
+    global _WORKDIR
+    if config.CLI_WORKDIR:
+        path = Path(config.CLI_WORKDIR).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+    if _WORKDIR is None:
+        _WORKDIR = tempfile.mkdtemp(prefix="challengebox-cli-")
+        atexit.register(shutil.rmtree, _WORKDIR, True)
+    return _WORKDIR
+
+
+def _child_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for name in _SCRUBBED_ENV:
+        env.pop(name, None)
+    for key, value in config.load_env().items():
+        if value and key.startswith(_PASSTHROUGH_PREFIXES):
+            env[key] = value
+    return env
+
+
+def _split_messages(messages: list[dict[str, str]]) -> tuple[str, str]:
+    """Collapse OpenAI-style messages into (system prompt, user prompt)."""
+    system_parts: list[str] = []
+    user_parts: list[str] = []
+    for message in messages or []:
+        role = (message.get("role") or "user").lower()
+        text = message.get("content") or ""
+        if not text:
+            continue
+        if role == "system":
+            system_parts.append(text)
+        elif role == "assistant":
+            user_parts.append(f"[previous answer]\n{text}")
+        else:
+            user_parts.append(text)
+    return "\n\n".join(system_parts).strip(), "\n\n".join(user_parts).strip()
+
+
+def build_argv(
+    *,
+    model: str,
+    system: str,
+    effort: str,
+    json_schema: Optional[dict[str, Any]] = None,
+    budget_usd: float = 0.0,
+    fallback_models: Optional[list[str]] = None,
+    resume: str = "",
+    session_id: str = "",
+    resumable: bool = False,
+) -> list[str]:
+    """The full `claude` command line for one non-interactive call."""
+    argv = [
+        config.CLAUDE_BIN,
+        "--print",
+        "--output-format",
+        "json",
+        "--model",
+        model,
+        "--tools",
+        config.CLI_TOOLS,
+        "--permission-prompts",
+        "none",
+        "--strict-mcp-config",
+        "--effort",
+        effort,
+    ]
+    if config.CLI_SAFE_MODE:
+        argv.append("--safe-mode")
+    if system:
+        argv += ["--system-prompt", system]
+    if fallback_models:
+        argv += ["--fallback-model", ",".join(fallback_models)]
+    if budget_usd and budget_usd > 0:
+        argv += ["--max-budget-usd", f"{budget_usd:.2f}"]
+    if json_schema:
+        argv += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
+    if resume:
+        # Fork so a rejected repair cannot corrupt the branch we came from,
+        # and render the new system prompt instead of the recorded one.
+        argv += ["--resume", resume, "--fork-session", "--system-prompt-snapshot", "off"]
+    # Always name the session ourselves: a parent Claude Code process exports
+    # its own session id, and an inherited one must never be resumable.
+    argv += ["--session-id", session_id or str(uuid.uuid4())]
+    if not resumable:
+        argv.append("--no-session-persistence")
+    return argv
+
+
+def parse_result(stdout: str) -> Optional[dict[str, Any]]:
+    """Pull the result object out of CLI stdout, ignoring any noise lines."""
+    found: Optional[dict[str, Any]] = None
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("type") == "result":
+            found = payload
+    if found is not None:
+        return found
+    try:
+        payload = json.loads((stdout or "").strip())
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def payload_error(payload: dict[str, Any]) -> str:
+    """Empty string when the CLI really did answer."""
+    if payload.get("is_error"):
+        status = payload.get("api_error_status")
+        detail = str(payload.get("result") or "cli reported an error")[:200]
+        return f"api_error status={status}: {detail}"
+    terminal = payload.get("terminal_reason")
+    if terminal and terminal not in {"completed", "success"}:
+        return f"terminal_reason={terminal}"
+    subtype = payload.get("subtype")
+    if subtype and subtype != "success":
+        return f"subtype={subtype}"
     return ""
 
 
-def _openai_compatible(
-    url: str,
-    keys: list[str],
-    messages: list[dict[str, str]],
-    *,
-    model: str,
-    max_tokens: int,
-    temperature: float,
-    json_mode: bool,
-    extra: dict[str, Any] | None = None,
-    user_agent: str = "",
-) -> ModelReply:
-    last_error = None
-    body: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    if extra:
-        body.update(extra)
-    if json_mode:
-        body["response_format"] = {"type": "json_object"}
-    headers_base = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    if user_agent:
-        headers_base["User-Agent"] = user_agent
-
-    if not keys:
-        raise RuntimeError(f"no API key for {url}")
-    for attempt in range(4):
-        data = json.dumps(body).encode()
-        key = keys[attempt % len(keys)]
-        headers = dict(headers_base)
-        headers["Authorization"] = f"Bearer {key}"
-        request = urllib.request.Request(url, data=data, method="POST", headers=headers)
-        try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                payload = json.load(response)
-            usage = payload.get("usage") or {}
-            return ModelReply(
-                text=_extract_openai_text(payload),
-                model=body.get("model") or model,
-                tier="",
-                fallback=False,
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-            )
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")[:240]
-            last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
-            if exc.code == 429:
-                time.sleep(2.0 * (attempt + 1))
-                continue
-            if exc.code == 401:
-                continue
-            if exc.code == 400 and extra and "reasoning_effort" in extra:
-                extra.pop("reasoning_effort", None)
-                body.pop("reasoning_effort", None)
-                continue
-            raise last_error from exc
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            time.sleep(1.0)
-            continue
-    raise RuntimeError(f"chat request failed: {last_error}")
-
-
-def _chat_groq(
-    messages: list[dict[str, str]],
-    *,
-    model: str,
-    max_tokens: int,
-    temperature: float,
-    json_mode: bool,
-    reasoning_effort: str,
-) -> ModelReply:
-    reply = _openai_compatible(
-        config.GROQ_CHAT_URL,
-        _groq_keys(),
-        messages,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        json_mode=json_mode,
-        extra={"reasoning_effort": reasoning_effort},
-        user_agent=config.USER_AGENT,
-    )
-    reply.provider = "groq"
-    return reply
-
-
-def _chat_openai(
-    messages: list[dict[str, str]],
-    *,
-    model: str,
-    max_tokens: int,
-    temperature: float,
-    json_mode: bool,
-) -> ModelReply:
-    key = _env_key("OPENAI_API_KEY")
-    reply = _openai_compatible(
-        config.OPENAI_CHAT_URL,
-        [key] if key else [],
-        messages,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        json_mode=json_mode,
-    )
-    reply.provider = "openai"
-    return reply
-
-
-def _gemini_parts(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, Any]]]:
-    system = ""
-    contents = []
-    for message in messages:
-        role = message.get("role") or "user"
-        text = message.get("content") or ""
-        if role == "system":
-            system = (system + "\n" + text).strip() if system else text
-            continue
-        gemini_role = "model" if role == "assistant" else "user"
-        contents.append({"role": gemini_role, "parts": [{"text": text}]})
-    if not contents:
-        contents = [{"role": "user", "parts": [{"text": system or " "}]}]
-        system = ""
-    return system, contents
-
-
-def _chat_gemini(
-    messages: list[dict[str, str]],
-    *,
-    model: str,
-    max_tokens: int,
-    temperature: float,
-    json_mode: bool,
-) -> ModelReply:
-    key = _env_key("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("no Gemini API key")
-    system, contents = _gemini_parts(messages)
-    url = config.GEMINI_GENERATE_URL.format(model=model) + "?" + urlencode({"key": key})
-    body: dict[str, Any] = {
-        "contents": contents,
-        "generationConfig": {
-            "maxOutputTokens": max_tokens,
-            "temperature": temperature,
-        },
-    }
-    if system:
-        body["system_instruction"] = {"parts": [{"text": system}]}
-    if json_mode:
-        body["generationConfig"]["responseMimeType"] = "application/json"
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-    )
+def _invoke(argv: list[str], prompt: str, timeout_s: float) -> tuple[Optional[dict[str, Any]], str]:
     try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            payload = json.load(response)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:240]
-        raise RuntimeError(f"Gemini HTTP {exc.code}: {detail}") from exc
-    candidates = payload.get("candidates") or [{}]
-    parts = ((candidates[0] or {}).get("content") or {}).get("parts") or []
-    text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
-    usage = payload.get("usageMetadata") or {}
-    return ModelReply(
-        text=text.strip(),
-        model=model,
-        tier="",
-        fallback=False,
-        prompt_tokens=int(usage.get("promptTokenCount") or 0),
-        completion_tokens=int(usage.get("candidatesTokenCount") or 0),
-        provider="gemini",
-    )
-
-
-def _call_provider(
-    provider: str,
-    messages: list[dict[str, str]],
-    *,
-    tier: str,
-    max_tokens: int,
-    temperature: float,
-    json_mode: bool,
-) -> ModelReply:
-    effort = "medium" if tier == "strong" else "low"
-    if provider == "gemini":
-        return _chat_gemini(
-            messages,
-            model=config.CHEAP_MODEL if tier == "cheap" else config.CHEAP_MODEL,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            json_mode=json_mode,
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=_workdir(),
+            env=_child_env(),
+            start_new_session=True,
         )
-    if provider == "openai":
-        return _chat_openai(
-            messages,
-            model=config.FALLBACK_MODEL,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            json_mode=json_mode,
-        )
-    model = model_for(tier) if tier != "cheap" else config.NORMAL_MODEL
-    return _chat_groq(
-        messages,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        json_mode=json_mode,
-        reasoning_effort=effort,
-    )
+    except FileNotFoundError:
+        return None, f"{config.CLAUDE_BIN} not found on PATH"
+    except OSError as exc:
+        return None, f"spawn failed: {exc}"
+
+    try:
+        stdout, stderr = process.communicate(input=prompt, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill(process)
+        return None, f"timeout after {timeout_s:.0f}s"
+
+    payload = parse_result(stdout)
+    if payload is None:
+        detail = (stderr or stdout or "no output").strip().splitlines()
+        return None, f"exit={process.returncode} unparsable output: {detail[-1][:200] if detail else ''}"
+    error = payload_error(payload)
+    if error:
+        return payload, error
+    if process.returncode not in (0, None):
+        return payload, f"exit={process.returncode}"
+    return payload, ""
 
 
-def chat(
-    messages: list[dict[str, str]],
-    *,
-    tier: str = "cheap",
-    max_tokens: int = 800,
-    temperature: float = 0.1,
-    json_mode: bool = False,
-    fallback_text: str = "",
-) -> ModelReply:
-    requested = provider_for(tier)
-    chain = [requested]
-    if "groq" not in chain:
-        chain.append("groq")
-    if config.FALLBACK_PROVIDER not in chain:
-        chain.append(config.FALLBACK_PROVIDER)
+def _kill(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(process.pid), 9)
+    except (ProcessLookupError, PermissionError, OSError):
+        process.kill()
+    try:
+        process.communicate(timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
 
-    last_error = None
-    for index, provider in enumerate(chain):
-        try:
-            reply = _call_provider(
-                provider,
-                messages,
-                tier=tier,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                json_mode=json_mode,
-            )
-            reply.tier = tier
-            if not reply.text.strip():
-                last_error = RuntimeError(f"{provider} empty content")
-                continue
-            reply.fallback = index > 0
-            USAGE.add(reply)
-            return reply
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
+
+def _sum_model_usage(payload: dict[str, Any]) -> dict[str, int]:
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
+    for entry in (payload.get("modelUsage") or {}).values():
+        if not isinstance(entry, dict):
             continue
+        totals["input"] += int(entry.get("inputTokens") or 0)
+        totals["output"] += int(entry.get("outputTokens") or 0)
+        totals["cache_read"] += int(entry.get("cacheReadInputTokens") or 0)
+        totals["cache_creation"] += int(entry.get("cacheCreationInputTokens") or 0)
+    if any(totals.values()):
+        return totals
+    usage = payload.get("usage") or {}
+    return {
+        "input": int(usage.get("input_tokens") or 0),
+        "output": int(usage.get("output_tokens") or 0),
+        "cache_read": int(usage.get("cache_read_input_tokens") or 0),
+        "cache_creation": int(usage.get("cache_creation_input_tokens") or 0),
+    }
 
+
+def _reply_from_payload(payload: dict[str, Any], requested: str, tier: str) -> ModelReply:
+    used = list((payload.get("modelUsage") or {}).keys())
+    structured = payload.get("structured_output")
+    if not isinstance(structured, dict):
+        structured = None
+    text = str(payload.get("result") or "").strip()
+    if not text and structured is not None:
+        text = json.dumps(structured)
+    totals = _sum_model_usage(payload)
+    return ModelReply(
+        text=text,
+        model=used[0] if len(used) == 1 else requested,
+        tier=tier,
+        fallback=False,
+        prompt_tokens=totals["input"],
+        completion_tokens=totals["output"],
+        provider=config.PROVIDER,
+        cache_read_tokens=totals["cache_read"],
+        cache_creation_tokens=totals["cache_creation"],
+        cost_usd=float(payload.get("total_cost_usd") or 0.0),
+        session_id=str(payload.get("session_id") or ""),
+        structured=structured,
+        duration_ms=int(payload.get("duration_ms") or 0),
+    )
+
+
+def _local_reply(tier: str, fallback_text: str, reason: str) -> ModelReply:
     reply = ModelReply(
         text=fallback_text,
         model="local-fallback",
         tier=tier,
         fallback=True,
         provider="local",
+        error=reason,
     )
     USAGE.add(reply)
     return reply
+
+
+def chat(
+    messages: list[dict[str, str]],
+    *,
+    tier: str = "cheap",
+    remaining_s: float = 0.0,
+    json_mode: bool = False,
+    json_schema: Optional[dict[str, Any]] = None,
+    budget_usd: float = 0.0,
+    timeout_s: Optional[float] = None,
+    resume_session: str = "",
+    resumable: bool = False,
+    fallback_text: str = "",
+) -> ModelReply:
+    """One Claude CLI turn, with model fallback and a hard time budget."""
+    system, user = _split_messages(messages)
+    if json_mode and not json_schema:
+        system = f"{system}\n\n{_JSON_ONLY}".strip()
+
+    total_s = call_timeout(remaining_s) if timeout_s is None else float(timeout_s)
+    if not cli_available():
+        return _local_reply(tier, fallback_text, f"{config.CLAUDE_BIN} not installed")
+    if total_s < config.CLI_MIN_CALL_S:
+        return _local_reply(tier, fallback_text, "not enough time for a model call")
+
+    effort = effort_for(tier, remaining_s)
+    chain = model_chain(tier)
+    schema = json_schema
+    resume = resume_session if config.REUSE_SESSION and resumable_session(resume_session) else ""
+    keep = bool(resumable or resume) and config.REUSE_SESSION
+    started = time.monotonic()
+    errors: list[str] = []
+
+    for index, model in enumerate(chain):
+        attempts = max(1, config.CLI_ATTEMPTS)
+        attempt = 0
+        while attempt < attempts:
+            attempt += 1
+            left = total_s - (time.monotonic() - started)
+            if left < config.CLI_MIN_CALL_S:
+                return _local_reply(tier, fallback_text, "; ".join(errors[-2:]) or "out of time")
+            session_id = str(uuid.uuid4())
+            argv = build_argv(
+                model=model,
+                system=system,
+                effort=effort,
+                json_schema=schema,
+                budget_usd=budget_usd,
+                fallback_models=chain[index + 1 :],
+                resume=resume,
+                session_id=session_id,
+                resumable=keep,
+            )
+            payload, error = _invoke(argv, user, left)
+            if payload is not None:
+                reply = _reply_from_payload(payload, model, tier)
+                if not error and not reply.text.strip():
+                    error = "empty result"
+                if not error:
+                    reply.fallback = index > 0 or reply.model != model
+                    if keep:
+                        _MINTED.add(session_id)
+                        reply.session_id = session_id
+                    else:
+                        reply.session_id = ""
+                    USAGE.add(reply)
+                    return reply
+                # A failed turn still burned tokens; keep the cost books honest.
+                reply.fallback = True
+                reply.error = error
+                reply.session_id = ""
+                USAGE.add(reply)
+            errors.append(f"{model}: {error}")
+            if schema is not None and "schema" in error.lower():
+                schema = None  # structured output refused; fall back to prompted JSON
+                attempts += 1
+                continue
+            if resume:
+                resume = ""  # stale session id; retry as a fresh conversation
+                attempts += 1
+                continue
+            time.sleep(1.0)
+
+    return _local_reply(tier, fallback_text, "; ".join(errors[-3:]) or "all models failed")
+
+
+def probe(timeout_s: float = 90.0) -> tuple[bool, str]:
+    """One tiny call that proves the CLI is installed and authenticated."""
+    if not cli_available(refresh=True):
+        return False, f"{config.CLAUDE_BIN} is not on PATH"
+    reply = chat(
+        [
+            {"role": "system", "content": "Reply with the requested text only."},
+            {"role": "user", "content": "Reply with exactly: OK"},
+        ],
+        tier="cheap",
+        timeout_s=timeout_s,
+    )
+    if reply.provider == "local":
+        return False, reply.error or "no reply"
+    return True, f"{reply.model} replied {reply.text[:40]!r} (${reply.cost_usd:.4f})"
+
+
+# --------------------------------------------------------------- extraction
 
 
 def extract_json(text: str) -> dict[str, Any]:
@@ -419,6 +561,13 @@ def extract_json(text: str) -> dict[str, Any]:
             return value if isinstance(value, dict) else {}
         except json.JSONDecodeError:
             return {}
+
+
+def reply_json(reply: ModelReply) -> dict[str, Any]:
+    """Structured output when the CLI validated a schema, else parsed text."""
+    if isinstance(reply.structured, dict) and reply.structured:
+        return reply.structured
+    return extract_json(reply.text)
 
 
 def extract_code(text: str, language: str = "python") -> str:

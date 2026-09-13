@@ -14,7 +14,7 @@ from typing import Any
 
 from . import config
 from .analyzer import Analysis
-from .models import chat, choose_tier, extract_json
+from .models import chat, choose_tier, reply_json
 from .planner import Plan
 
 
@@ -170,8 +170,31 @@ def build_tests(analysis: Analysis, problem: dict[str, Any]) -> list[dict[str, A
     return tests
 
 
+# `expected` is whatever the entrypoint returns, so it stays untyped; the CLI
+# still guarantees the envelope, which prompted JSON alone does not.
+ADVERSARIAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tests": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "args": {"type": "array"},
+                    "stdin": {"type": "string"},
+                    "expected": {},
+                },
+                "required": ["name", "expected"],
+            },
+        }
+    },
+    "required": ["tests"],
+}
+
+
 def propose_adversarial_tests(analysis: Analysis, plan: Plan | None, remaining_s: float) -> list[dict[str, Any]]:
-    if remaining_s < 70 or plan is None:
+    if remaining_s < config.ADVERSARIAL_MIN_S or plan is None:
         return []
     tier = choose_tier("tests", analysis.difficulty, remaining_s)
     reply = chat(
@@ -195,11 +218,13 @@ def propose_adversarial_tests(analysis: Analysis, plan: Plan | None, remaining_s
             },
         ],
         tier=tier,
-        max_tokens=config.TESTGEN_MAX_TOKENS,
+        remaining_s=remaining_s,
         json_mode=True,
+        json_schema=ADVERSARIAL_SCHEMA,
+        budget_usd=config.TESTGEN_BUDGET_USD,
         fallback_text="",
     )
-    data = extract_json(reply.text)
+    data = reply_json(reply)
     out = []
     for i, raw in enumerate(data.get("tests") or []):
         if not isinstance(raw, dict) or "expected" not in raw:

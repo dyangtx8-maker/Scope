@@ -98,19 +98,44 @@ python3 solve.py --all
 python3 tests/test_architecture.py
 ```
 
-Uses `GROQ_API_KEY`, `GEMINI_API_KEY`, and optional `OPENAI_API_KEY` from `.env`. Review token use, routing, and repairs in `solutions/*.meta.json`.
+No provider API key lives in this project: every model call is made by the Claude CLI, which brings its own authentication. Review token use, cost, routing, and repairs in `solutions/*.meta.json`.
 
 ## Phase 3 graph
 
 Control flow is a small LangGraph in `agent/graph.py`. Stages are unchanged.
 
-* Plan and adversarial tests: Gemini `gemini-2.5-flash-lite`
-* Generate and repair: Groq `openai/gpt-oss-120b`
-* Groq failure: OpenAI `gpt-4.1-mini`
-* Analyzer, verifier, benchmark: local
+## Phase 4 runtime: Claude models through the Claude CLI
+
+Every tier is now a Claude model, and the only transport is the Claude Code
+CLI (`claude -p`). There is no provider SDK, no HTTP client, and no API key in
+this repo.
+
+| Job | Tier | Model |
+|---|---|---|
+| Plan, adversarial test ideas | cheap | `claude-haiku-4-5-20251001` |
+| Python / Rust generation, repair | normal | `claude-sonnet-5` |
+| Hard problems, escalated repair | strong | `claude-opus-5` |
+| Trap extraction, spec tests, stub check, benchmark, disk write | — | local, no model |
+
+The CLI, not this code, owns authentication, overload fallback
+(`--fallback-model`), prompt caching and session storage. `agent/models.py`
+only builds the argv, writes the prompt to stdin, and reads back the single
+JSON result object.
+
+### Setup
 
 ```bash
+npm install -g @anthropic-ai/claude-code   # provides the `claude` binary
+claude login                               # or export ANTHROPIC_API_KEY
 pip3 install -r requirements.txt
-python3 tests/test_architecture.py
+python3 solve.py --check                   # one tiny call proves auth works
+python3 tests/test_architecture.py         # no network, no CLI needed
 python3 solve.py problems/problem_01.json
 ```
+
+`solve.py --models` prints the routing table. Every model, timeout and spend
+cap is overridable from the environment or `.env` — see `.env.example`.
+
+> `solutions/*.meta.json` checked into this repo are the records of an older
+> run on the previous providers. Re-run the solver to regenerate them with
+> Claude models.

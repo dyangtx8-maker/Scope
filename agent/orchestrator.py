@@ -61,6 +61,7 @@ class Orchestrator:
             "repair_attempt": 0,
             "rust_meta": {},
             "gen_meta": {},
+            "session_id": "",
         }
         final = compiled_graph().invoke(state)
         self.events = [

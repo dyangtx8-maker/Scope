@@ -47,6 +47,7 @@ class AgentState(TypedDict, total=False):
     best_code: str
     best_report: Any
     benchmark: dict
+    session_id: str
     meta: dict
 
 
@@ -117,6 +118,7 @@ def node_analyze(state: AgentState) -> dict[str, Any]:
         "repair_attempt": 0,
         "rust_meta": {},
         "gen_meta": {},
+        "session_id": "",
     }
 
 
@@ -146,7 +148,8 @@ def node_generate(state: AgentState) -> dict[str, Any]:
         state,
         "generate",
         f"python chars={len(code)} model={gen_meta.get('model')} "
-        f"tier={gen_meta.get('tier')} provider={gen_meta.get('provider', '')}",
+        f"tier={gen_meta.get('tier')} provider={gen_meta.get('provider', '')} "
+        f"cost=${float(gen_meta.get('cost_usd') or 0.0):.4f}",
         node="generate",
         **gen_meta,
     )
@@ -155,6 +158,7 @@ def node_generate(state: AgentState) -> dict[str, Any]:
         "code": code,
         "best_code": code,
         "gen_meta": gen_meta,
+        "session_id": gen_meta.get("session_id") or "",
         "events": events,
     }
 
@@ -232,6 +236,7 @@ def node_repair(state: AgentState) -> dict[str, Any]:
         state["report"],
         state["deadline"].remaining(),
         attempt=attempt,
+        session_id=state.get("session_id") or "",
     )
     candidate_report = verify(candidate, state["analysis"], state.get("tests") or [])
     best_code = state.get("best_code") or state.get("code") or ""
@@ -259,6 +264,7 @@ def node_repair(state: AgentState) -> dict[str, Any]:
             "summary": candidate_report.summary,
             "model": repair_meta.get("model"),
             "tier": repair_meta.get("tier"),
+            "cost_usd": repair_meta.get("cost_usd"),
         }
     )
     events = _emit(
@@ -277,6 +283,7 @@ def node_repair(state: AgentState) -> dict[str, Any]:
         "best_report": best_report,
         "repair_attempt": attempt,
         "repairs": repairs,
+        "session_id": repair_meta.get("session_id") or state.get("session_id") or "",
         "events": events,
     }
 
@@ -288,6 +295,7 @@ def node_emit_rust(state: AgentState) -> dict[str, Any]:
         state["plan"],
         state.get("code") or "",
         state["deadline"].remaining(),
+        session_id=state.get("session_id") or "",
     )
     ctx.rust_code = rust_code
     events = _emit(
@@ -324,6 +332,7 @@ def node_emit_rust(state: AgentState) -> dict[str, Any]:
         "rust_code": rust_code,
         "rust_meta": rust_meta,
         "rust_report": rust_report,
+        "session_id": rust_meta.get("session_id") or state.get("session_id") or "",
         "events": events,
     }
 
@@ -384,6 +393,12 @@ def node_write(state: AgentState) -> dict[str, Any]:
 
     meta = {
         "phase": config.PHASE,
+        "runtime": config.RUNTIME,
+        "models": {
+            "cheap": config.CHEAP_MODEL,
+            "normal": config.NORMAL_MODEL,
+            "strong": config.STRONG_MODEL,
+        },
         "problem_id": analysis.problem_id,
         "source": state["problem_path"],
         "solution": str(solution_path),
@@ -394,6 +409,7 @@ def node_write(state: AgentState) -> dict[str, Any]:
         "rust_verified": rust_ok if rust_report else None,
         "elapsed_s": round(deadline.elapsed(), 3),
         "deadline_s": deadline.total_s,
+        "cost_usd": round(USAGE.cost_usd, 6),
         "usage": USAGE.to_dict(),
         "analysis": analysis.compact(),
         "plan": state["plan"].to_dict(),
@@ -411,7 +427,7 @@ def node_write(state: AgentState) -> dict[str, Any]:
     events = _emit(
         {**state, "events": events},
         "write",
-        f"{solution_path.name} verified={verified}",
+        f"{solution_path.name} verified={verified} cost=${USAGE.cost_usd:.4f}",
         node="write",
     )
     meta["events"] = events

@@ -1,0 +1,151 @@
+<!-- Source for docs/challengebox-architecture.png (1280x720).
+     Render with any headless browser, for example:
+       chrome --headless --hide-scrollbars --window-size=1280,860 \
+              --screenshot=out.png file://$PWD/docs/challengebox-architecture.html
+     then keep the top 720 rows. Edit this file, never the PNG. -->
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1280px; min-height: 720px; background: #fff; color: #1e293b;
+    font-family: "DejaVu Sans", "Helvetica Neue", Arial, sans-serif;
+    padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; justify-content: space-between;
+  }
+  h1 { font-size: 25px; color: #1e3a8a; text-align: center; letter-spacing: .2px; }
+  h1 small { display: block; font-size: 13px; font-weight: normal; color: #475569; margin-top: 3px; }
+  .row { display: flex; gap: 12px; }
+  .panel { border: 2px solid #93c5fd; border-radius: 12px; padding: 10px; background: #fff; }
+  .panel > h2 { font-size: 15px; text-align: center; color: #1d4ed8; margin-bottom: 8px; }
+  .input { width: 196px; background: #eff6ff; border-color: #bfdbfe;
+           display: flex; flex-direction: column; }
+  .card { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: bold; }
+  .card .glyph { width: 34px; height: 34px; border-radius: 9px; background: #2563eb; color: #fff;
+                 display: flex; align-items: center; justify-content: center; font-size: 16px; flex: none; }
+  .rule { height: 1px; background: #cbd5e1; }
+  .flow { flex: 1; border-color: #3b82f6; display: flex; flex-direction: column; gap: 2px; }
+  .step { border: 1.5px solid #cbd5e1; border-left-width: 5px; border-radius: 8px; padding: 3px 9px;
+          display: flex; align-items: center; gap: 9px; }
+  .step .glyph { width: 26px; height: 26px; border-radius: 7px; display: flex; align-items: center;
+                 justify-content: center; font-size: 13px; color: #fff; flex: none; }
+  .step b { font-size: 13.5px; display: block; }
+  .step span { font-size: 11.5px; color: #475569; }
+  .arrow { text-align: center; font-size: 9px; color: #94a3b8; height: 7px; line-height: 7px; }
+  .blue   { border-left-color: #2563eb; } .blue   .glyph { background: #2563eb; }
+  .green  { border-left-color: #16a34a; } .green  .glyph { background: #16a34a; }
+  .orange { border-left-color: #ea580c; } .orange .glyph { background: #ea580c; }
+  .purple { border-left-color: #7c3aed; } .purple .glyph { background: #7c3aed; }
+  .grey   { border-left-color: #64748b; } .grey   .glyph { background: #64748b; }
+  .output { width: 176px; background: #f8fafc; border-color: #cbd5e1;
+            display: flex; flex-direction: column; }
+  .body { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 12px; }
+  .output h2 { color: #475569; }
+  .routing { width: 268px; background: #faf5ff; border-color: #ddd6fe; }
+  .routing h2 { color: #6d28d9; }
+  .route { display: flex; gap: 9px; align-items: flex-start; padding: 6px 0; }
+  .route .glyph { width: 30px; height: 30px; border-radius: 50%; border: 2px solid; display: flex;
+                  align-items: center; justify-content: center; font-size: 14px; flex: none; }
+  .route b { font-size: 12.5px; display: block; }
+  .route span { font-size: 11.5px; color: #334155; display: block; line-height: 1.35; }
+  .route code { font-family: "DejaVu Sans Mono", monospace; font-size: 10.5px; color: #0f172a; }
+  .deadline { border: 2px solid #1d4ed8; border-radius: 12px; padding: 8px 10px; }
+  .deadline h2 { font-size: 15px; text-align: center; color: #1e3a8a; margin-bottom: 6px; }
+  .clocks { display: flex; gap: 10px; align-items: center; }
+  .clock { flex: 1; display: flex; gap: 8px; align-items: center; }
+  .clock .glyph { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #2563eb;
+                  display: flex; align-items: center; justify-content: center; font-size: 13px; flex: none; }
+  .clock b { font-size: 12px; display: block; }
+  .clock span { font-size: 11px; color: #475569; display: block; line-height: 1.3; }
+  .sep { width: 1px; align-self: stretch; background: #cbd5e1; }
+  .note { font-size: 11px; color: #475569; text-align: center; margin-top: 6px; font-style: italic; }
+</style>
+<h1>ChallengeBox Agent Architecture (LangGraph)
+  <small>every model call served by the Claude CLI &mdash; <code>claude -p --output-format json</code></small>
+</h1>
+
+<div class="row">
+  <div class="panel input">
+    <h2>1) INPUT</h2>
+    <div class="body">
+    <div class="card"><div class="glyph">{ }</div>Problem JSON</div>
+    <div class="rule"></div>
+    <div class="card"><div class="glyph">&#9656;</div>solve.py CLI</div>
+    <div class="rule"></div>
+    <div class="card"><div class="glyph">&#9881;</div>claude binary</div>
+    </div>
+  </div>
+
+  <div class="panel flow">
+    <h2>2) LangGraph Workflow</h2>
+    <div class="step blue"><div class="glyph">&#9881;</div><div><b>Analyze</b><span>local, no model &mdash; trap / bounds detection</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step green"><div class="glyph">&#9733;</div><div><b>Plan</b><span>Claude Haiku 4.5 &mdash; cheap tier, JSON schema</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step orange"><div class="glyph">&lt;/&gt;</div><div><b>Generate</b><span>Claude Sonnet 5 &middot; Opus 5 on hard problems</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step green"><div class="glyph">&#9636;</div><div><b>Tests</b><span>local spec + optional Claude Haiku adversarial</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step blue"><div class="glyph">&#10003;</div><div><b>Verify</b><span>local syntax, stub check, run tests</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step orange"><div class="glyph">&#8635;</div><div><b>Repair</b><span>Claude, resumes the generate session, max 3, keep best</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step purple"><div class="glyph">&#9881;</div><div><b>Emit Rust branch</b><span>Claude writes fn main() for Rust problems</span></div></div>
+    <div class="arrow">&#9660;</div>
+    <div class="step grey"><div class="glyph">&#9639;</div><div><b>Write output</b><span>always before the reserve runs out</span></div></div>
+  </div>
+
+  <div class="panel output">
+    <h2>3) OUTPUT</h2>
+    <div class="body">
+    <div class="card"><div class="glyph" style="background:#64748b">&#9647;</div>solutions/*.py or .rs</div>
+    <div class="rule"></div>
+    <div class="card"><div class="glyph" style="background:#64748b">&#9636;</div>.meta.json logs</div>
+    <div class="rule"></div>
+    <div class="card"><div class="glyph" style="background:#16a34a">$</div>cost + tokens<br>per model</div>
+    </div>
+  </div>
+
+  <div class="panel routing">
+    <h2>Model Routing</h2>
+    <div class="route">
+      <div class="glyph" style="border-color:#16a34a;color:#16a34a">$</div>
+      <div><b style="color:#16a34a">Cheap tier</b><span><code>claude-haiku-4-5</code><br>plan, adversarial tests &middot; effort low</span></div>
+    </div>
+    <div class="rule"></div>
+    <div class="route">
+      <div class="glyph" style="border-color:#ea580c;color:#ea580c">&lt;&gt;</div>
+      <div><b style="color:#ea580c">Normal tier</b><span><code>claude-sonnet-5</code><br>codegen + repair &middot; effort medium</span></div>
+    </div>
+    <div class="rule"></div>
+    <div class="route">
+      <div class="glyph" style="border-color:#7c3aed;color:#7c3aed">&#9650;</div>
+      <div><b style="color:#7c3aed">Strong tier</b><span><code>claude-opus-5</code><br>hard problems, escalated repair</span></div>
+    </div>
+    <div class="rule"></div>
+    <div class="route">
+      <div class="glyph" style="border-color:#2563eb;color:#2563eb">&#8635;</div>
+      <div><b style="color:#2563eb">Fallback</b><span>chain opus &rarr; sonnet &rarr; haiku,<br>then local heuristic text</span></div>
+    </div>
+    <div class="rule"></div>
+    <div class="route">
+      <div class="glyph" style="border-color:#64748b;color:#64748b">&#9635;</div>
+      <div><b style="color:#64748b">Local only</b><span>analyzer, verifier, benchmark, file write</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="deadline">
+  <h2>Deadline Aware</h2>
+  <div class="clocks">
+    <div class="clock"><div class="glyph">&#9201;</div><div><b>Countdown driven</b><span>every call capped at remaining &minus; reserve</span></div></div>
+    <div class="sep"></div>
+    <div class="clock"><div class="glyph" style="border-color:#2563eb">&#9200;</div><div><b style="color:#2563eb">RESERVE_S</b><span>writer's buffer, always protected</span></div></div>
+    <div class="sep"></div>
+    <div class="clock"><div class="glyph" style="border-color:#16a34a">&#9200;</div><div><b style="color:#16a34a">LATE_PHASE_S</b><span>switch to frugal mode</span></div></div>
+    <div class="sep"></div>
+    <div class="clock"><div class="glyph" style="border-color:#ea580c">&#9200;</div><div><b style="color:#ea580c">MIN_REPAIR_S</b><span>guard for final attempts</span></div></div>
+    <div class="sep"></div>
+    <div class="clock"><div class="glyph" style="border-color:#7c3aed">&#9881;</div><div><b style="color:#7c3aed">--effort</b><span>steps down when the clock is short</span></div></div>
+  </div>
+</div>
+
