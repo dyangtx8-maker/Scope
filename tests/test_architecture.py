@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -162,6 +165,37 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("--fork-session", argv)
         self.assertEqual(argv[argv.index("--session-id") + 1], "new-session")
         self.assertNotIn("--no-session-persistence", argv)
+
+    def test_env_file_values_drop_inline_comments(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text(
+                "# a whole-line comment\n"
+                "CLAUDE_CLI_TIMEOUT_S=120     # hard cap for one CLI call\n"
+                'export CLAUDE_NORMAL_MODEL="claude-sonnet-5"   # quoted\n'
+                "ANTHROPIC_API_KEY='sk-ant-a#b'\n"
+                "CLAUDE_CLI_TOOLS=\n"
+            )
+            env = config.load_env(path)
+        self.assertEqual(env["CLAUDE_CLI_TIMEOUT_S"], "120")
+        self.assertEqual(env["CLAUDE_NORMAL_MODEL"], "claude-sonnet-5")
+        # A '#' inside a quoted value is data, not a comment.
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-ant-a#b")
+        self.assertEqual(env["CLAUDE_CLI_TOOLS"], "")
+        self.assertEqual(config.load_env(Path(tmp) / "missing.env"), {})
+
+    def test_a_bad_number_falls_back_instead_of_crashing(self) -> None:
+        self.assertEqual(config._number("CLAUDE_CLI_ATTEMPTS", "2", int), 2)
+        os.environ["CHALLENGEBOX_TEST_NUMBER"] = "not-a-number"
+        try:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                value = config._number("CHALLENGEBOX_TEST_NUMBER", "7", int)
+        finally:
+            os.environ.pop("CHALLENGEBOX_TEST_NUMBER", None)
+        self.assertEqual(value, 7)
+        self.assertIn("not a number", err.getvalue())
 
     def test_windows_prefers_the_launchable_shim(self) -> None:
         self.assertEqual(models.bin_candidates("claude", windows=False), ["claude"])

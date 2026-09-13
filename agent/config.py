@@ -8,6 +8,7 @@ Authentication, overload retries, and prompt caching are the CLI's job.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +19,22 @@ ENV_PATH = ROOT / ".env"
 
 PHASE = 4
 RUNTIME = "claude-cli"
+
+
+def _clean_value(raw: str) -> str:
+    """Quoted value, or bare value up to an unquoted trailing comment."""
+    value = raw.strip()
+    if value[:1] in {'"', "'"}:
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end > 0:
+            return value[1:end]
+        return value[1:]
+    # `KEY=120   # hard cap` must not parse as "120   # hard cap".
+    for index in range(len(value)):
+        if value[index] == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index].strip()
+    return value
 
 
 def load_env(path: Path = ENV_PATH) -> dict[str, str]:
@@ -32,13 +49,19 @@ def load_env(path: Path = ENV_PATH) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        env[key.strip()] = value.strip()
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        if key:
+            env[key] = _clean_value(value)
     return env
 
 
 def setting(name: str, default: str) -> str:
     """Process environment wins, then .env, then the built-in default."""
-    value = os.environ.get(name)
+    # A real environment variable is taken literally; only the .env file has
+    # comment syntax to strip.
+    value = (os.environ.get(name) or "").strip()
     if value:
         return value
     value = load_env().get(name)
@@ -48,6 +71,27 @@ def setting(name: str, default: str) -> str:
 def _flag(name: str, default: bool) -> bool:
     raw = setting(name, "1" if default else "0").strip().lower()
     return raw not in {"0", "false", "no", "off", ""}
+
+
+def _number(name: str, default: str, cast):
+    """Never let one bad line in .env stop the agent from starting."""
+    raw = setting(name, default)
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        print(
+            f"config: ignoring {name}={raw!r} (not a number), using {default}",
+            file=sys.stderr,
+        )
+        return cast(default)
+
+
+def _float(name: str, default: str) -> float:
+    return _number(name, default, float)
+
+
+def _int(name: str, default: str) -> int:
+    return _number(name, default, int)
 
 
 # ----------------------------------------------------------------- transport
@@ -77,9 +121,9 @@ EFFORT_LADDER = ["low", "medium", "high"]
 # the deadline.
 EFFORT_DOWNGRADE_S = 150.0
 
-CLI_TIMEOUT_S = float(setting("CLAUDE_CLI_TIMEOUT_S", "120"))
-CLI_MIN_CALL_S = float(setting("CLAUDE_CLI_MIN_CALL_S", "20"))
-CLI_ATTEMPTS = int(setting("CLAUDE_CLI_ATTEMPTS", "2"))
+CLI_TIMEOUT_S = _float("CLAUDE_CLI_TIMEOUT_S", "120")
+CLI_MIN_CALL_S = _float("CLAUDE_CLI_MIN_CALL_S", "20")
+CLI_ATTEMPTS = _int("CLAUDE_CLI_ATTEMPTS", "2")
 # Ignore CLAUDE.md, skills, plugins, hooks and MCP servers so a developer's
 # local Claude Code setup cannot change what this agent generates.
 CLI_SAFE_MODE = _flag("CLAUDE_CLI_SAFE_MODE", True)
@@ -94,10 +138,10 @@ REUSE_SESSION = _flag("CLAUDE_REUSE_SESSION", True)
 # Spend guardrails handed to `claude --max-budget-usd`. They replace the old
 # max_tokens caps: with the CLI the useful bound is money, not tokens. Set a
 # stage to 0 to drop the flag.
-PLAN_BUDGET_USD = float(setting("CLAUDE_PLAN_BUDGET_USD", "0.50"))
-TESTGEN_BUDGET_USD = float(setting("CLAUDE_TESTGEN_BUDGET_USD", "0.50"))
-GENERATE_BUDGET_USD = float(setting("CLAUDE_GENERATE_BUDGET_USD", "2.00"))
-REPAIR_BUDGET_USD = float(setting("CLAUDE_REPAIR_BUDGET_USD", "2.00"))
+PLAN_BUDGET_USD = _float("CLAUDE_PLAN_BUDGET_USD", "0.50")
+TESTGEN_BUDGET_USD = _float("CLAUDE_TESTGEN_BUDGET_USD", "0.50")
+GENERATE_BUDGET_USD = _float("CLAUDE_GENERATE_BUDGET_USD", "2.00")
+REPAIR_BUDGET_USD = _float("CLAUDE_REPAIR_BUDGET_USD", "2.00")
 
 # ------------------------------------------------------------------ deadline
 # Re-tuned for CLI latency: a `claude -p` turn costs process start-up plus
