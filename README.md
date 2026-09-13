@@ -136,6 +136,16 @@ python3 solve.py problems/problem_01.json
 `solve.py --models` prints the routing table. Every model, timeout and spend
 cap is overridable from the environment or `.env` — see `.env.example`.
 
+On Windows `npm` installs a `claude.cmd` shim, which `CreateProcess` will only
+run under its exact filename, so the agent resolves the binary to a full path
+before launching it. If `--check` still reports that it cannot execute the CLI,
+point `CLAUDE_BIN` at the file directly:
+
+```powershell
+$env:CLAUDE_BIN = "$env:APPDATA\npm\claude.cmd"
+python solve.py --check
+```
+
 > `solutions/*.meta.json` checked into this repo are the records of an older
 > run on the previous providers. Re-run the solver to regenerate them with
 > Claude models.

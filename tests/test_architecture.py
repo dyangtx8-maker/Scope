@@ -137,7 +137,9 @@ class ArchitectureTests(unittest.TestCase):
 
     def test_cli_call_is_hermetic(self) -> None:
         argv = build_argv(model=NORMAL_MODEL, system="sys", effort="medium")
-        self.assertEqual(argv[0], config.CLAUDE_BIN)
+        # Popen gets the resolved path, never the bare name: on Windows the
+        # thing on PATH is claude.cmd and CreateProcess ignores PATHEXT.
+        self.assertEqual(argv[0], models.cli_path() or config.CLAUDE_BIN)
         for flag in ("--print", "--strict-mcp-config", "--safe-mode", "--no-session-persistence"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--output-format") + 1], "json")
@@ -160,6 +162,18 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("--fork-session", argv)
         self.assertEqual(argv[argv.index("--session-id") + 1], "new-session")
         self.assertNotIn("--no-session-persistence", argv)
+
+    def test_windows_prefers_the_launchable_shim(self) -> None:
+        self.assertEqual(models.bin_candidates("claude", windows=False), ["claude"])
+        self.assertEqual(
+            models.bin_candidates("claude", windows=True),
+            ["claude.cmd", "claude.exe", "claude.bat", "claude"],
+        )
+        # An explicit path with an extension is taken as given.
+        self.assertEqual(
+            models.bin_candidates(r"C:\tools\claude.cmd", windows=True),
+            [r"C:\tools\claude.cmd"],
+        )
 
     def test_only_sessions_we_minted_can_be_resumed(self) -> None:
         self.assertFalse(models.resumable_session(""))

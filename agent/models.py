@@ -188,7 +188,7 @@ _SCRUBBED_ENV = (
 _PASSTHROUGH_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_CODE_USE_")
 
 _WORKDIR: Optional[str] = None
-_AVAILABLE: Optional[bool] = None
+_CLI_PATH: Optional[str] = None
 # Session ids this process created. Only these may be resumed, so a session id
 # inherited from a parent Claude Code process can never be pulled into a call.
 _MINTED: set[str] = set()
@@ -198,12 +198,38 @@ def resumable_session(session_id: str) -> bool:
     return bool(session_id) and session_id in _MINTED
 
 
+def bin_candidates(name: str, windows: bool = os.name == "nt") -> list[str]:
+    """Names to look for on PATH, most launchable first.
+
+    On Windows `npm install -g` leaves a `claude.cmd` shim next to an
+    extensionless shell script. CreateProcess does not apply PATHEXT and
+    cannot run the shell script, so the shim has to win.
+    """
+    if not windows or os.path.splitext(name)[1]:
+        return [name]
+    return [name + ext for ext in (".cmd", ".exe", ".bat")] + [name]
+
+
+def cli_path(refresh: bool = False) -> str:
+    """Absolute path of the Claude binary, resolved once, or "" if missing.
+
+    The resolved path is what gets executed: handing Popen the bare name works
+    on POSIX but fails on Windows, where the thing on PATH is `claude.cmd`.
+    """
+    global _CLI_PATH
+    if refresh or _CLI_PATH is None:
+        _CLI_PATH = ""
+        for candidate in bin_candidates(config.CLAUDE_BIN):
+            found = shutil.which(candidate)
+            if found:
+                _CLI_PATH = found
+                break
+    return _CLI_PATH
+
+
 def cli_available(refresh: bool = False) -> bool:
     """True when the Claude CLI is on PATH."""
-    global _AVAILABLE
-    if refresh or _AVAILABLE is None:
-        _AVAILABLE = shutil.which(config.CLAUDE_BIN) is not None
-    return bool(_AVAILABLE)
+    return bool(cli_path(refresh))
 
 
 def _workdir() -> str:
@@ -261,7 +287,7 @@ def build_argv(
 ) -> list[str]:
     """The full `claude` command line for one non-interactive call."""
     argv = [
-        config.CLAUDE_BIN,
+        cli_path() or config.CLAUDE_BIN,
         "--print",
         "--output-format",
         "json",
@@ -347,7 +373,7 @@ def _invoke(argv: list[str], prompt: str, timeout_s: float) -> tuple[Optional[di
             start_new_session=True,
         )
     except FileNotFoundError:
-        return None, f"{config.CLAUDE_BIN} not found on PATH"
+        return None, f"cannot execute {argv[0]!r} (set CLAUDE_BIN to its full path)"
     except OSError as exc:
         return None, f"spawn failed: {exc}"
 
@@ -370,10 +396,17 @@ def _invoke(argv: list[str], prompt: str, timeout_s: float) -> tuple[Optional[di
 
 
 def _kill(process: subprocess.Popen) -> None:
+    # killpg takes the whole tree with it, but it only exists on POSIX.
     try:
-        os.killpg(os.getpgid(process.pid), 9)
-    except (ProcessLookupError, PermissionError, OSError):
-        process.kill()
+        if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+            os.killpg(os.getpgid(process.pid), 9)
+        else:
+            process.kill()
+    except Exception:  # noqa: BLE001
+        try:
+            process.kill()
+        except Exception:  # noqa: BLE001
+            pass
     try:
         process.communicate(timeout=5)
     except Exception:  # noqa: BLE001
@@ -527,7 +560,10 @@ def chat(
 def probe(timeout_s: float = 90.0) -> tuple[bool, str]:
     """One tiny call that proves the CLI is installed and authenticated."""
     if not cli_available(refresh=True):
-        return False, f"{config.CLAUDE_BIN} is not on PATH"
+        return False, (
+            f"{config.CLAUDE_BIN} is not on PATH - install Claude Code, or set "
+            "CLAUDE_BIN to the full path of the binary"
+        )
     reply = chat(
         [
             {"role": "system", "content": "Reply with the requested text only."},
