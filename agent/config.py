@@ -168,6 +168,11 @@ CLI_WORKDIR = setting("CLAUDE_CLI_CWD", "")
 # Resume the generate session during repair / Rust emission so the model keeps
 # the statement in context and the prompt cache stays warm.
 REUSE_SESSION = _flag("CLAUDE_REUSE_SESSION", True)
+# Run the test-writing stage alongside generation instead of after it. They
+# share no data - tests reads the analysis and the plan, never the code - so
+# overlapping them hands the saved wall clock back to the repair budget. Set
+# to 0 on a machine where two concurrent CLI processes contend.
+PARALLEL_STAGES = _flag("CLAUDE_PARALLEL_STAGES", True)
 
 # Spend guardrails handed to `claude --max-budget-usd`. They replace the old
 # max_tokens caps: with the CLI the useful bound is money, not tokens. Set a

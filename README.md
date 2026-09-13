@@ -133,6 +133,11 @@ python3 tests/test_architecture.py         # no network, no CLI needed
 python3 solve.py problems/problem_01.json
 ```
 
+`--all --jobs N` solves N problems at once in a process pool; each keeps its
+own deadline, so 4 is a sane ceiling on a laptop. Generation and test-writing
+already overlap within a single problem (`CLAUDE_PARALLEL_STAGES=0` disables
+it), which measured 259s → 182s on `problem_01`.
+
 Exit codes: `0` every problem verified, `1` a solution was written but failed
 local verification, `2` bad usage, `3` a run crashed or had to be salvaged.
 

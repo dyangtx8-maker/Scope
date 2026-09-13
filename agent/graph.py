@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import operator
+import threading
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -31,7 +33,9 @@ class AgentState(TypedDict, total=False):
     problem_path: str
     out_dir: str
     deadline: Any
-    events: list
+    # Reduced, not overwritten: generate and tests emit in the same super-step
+    # when they run in parallel, and both sets of events must survive.
+    events: Annotated[list, operator.add]
     ctx: Any
     analysis: Any
     plan: Any
@@ -61,7 +65,8 @@ def _report_score(report: VerifyReport) -> tuple[int, int, int, int]:
     )
 
 
-def _emit(state: AgentState, stage: str, detail: str, **extra: Any) -> list:
+def _emit(state: AgentState, stage: str, detail: str, **extra: Any) -> dict[str, Any]:
+    """Record one event. Nodes return only the events they produced."""
     deadline = state["deadline"]
     event = {
         "stage": stage,
@@ -70,29 +75,41 @@ def _emit(state: AgentState, stage: str, detail: str, **extra: Any) -> list:
         "detail": detail,
         "extra": extra,
     }
-    events = list(state.get("events") or [])
-    events.append(event)
+    ctx = state.get("ctx")
+    if ctx is not None:
+        # Also on the context, so a salvaged run can still report its history.
+        ctx.events.append(event)
     print(
         f"[{event['elapsed_s']:7.2f}s | rem {event['remaining_s']:7.2f}s] "
         f"{stage}: {detail}",
         flush=True,
     )
-    return events
+    return event
+
+
+_CTX_LOCK = threading.Lock()
 
 
 def _failed(state: AgentState, stage: str, exc: Exception) -> list:
     """Log a node failure and keep going: a missing file scores zero."""
     detail = f"{type(exc).__name__}: {exc}"
-    return _emit(
-        state,
-        stage,
-        f"node failed, falling back locally: {detail}"[:300],
-        node=stage,
-        error=detail,
-    )
+    return [
+        _emit(
+            state,
+            stage,
+            f"node failed, falling back locally: {detail}"[:300],
+            node=stage,
+            error=detail,
+        )
+    ]
 
 
 def _sync_ctx(state: AgentState) -> ToolContext:
+    with _CTX_LOCK:
+        return _sync_ctx_locked(state)
+
+
+def _sync_ctx_locked(state: AgentState) -> ToolContext:
     ctx: ToolContext = state["ctx"]
     ctx.remaining_s = state["deadline"].remaining()
     if "analysis" in state:
@@ -113,17 +130,12 @@ def _sync_ctx(state: AgentState) -> ToolContext:
 def node_analyze(state: AgentState) -> dict[str, Any]:
     ctx = _sync_ctx(state)
     read = maybe_run(ReadProblemTool(), ctx)
-    events = _emit(state, "analyze", read.summary, used=read.used, node="analyze")
+    events = [_emit(state, "analyze", read.summary, used=read.used, node="analyze")]
     analyzed = maybe_run(AnalyzeConstraintsTool(), ctx)
-    events = _emit(
-        {**state, "events": events},
-        "analyze",
-        analyzed.summary,
-        used=analyzed.used,
-        node="analyze",
+    events.append(
+        _emit(state, "analyze", analyzed.summary, used=analyzed.used, node="analyze")
     )
     return {
-        "ctx": ctx,
         "analysis": ctx.analysis,
         "events": events,
         "repairs": [],
@@ -143,17 +155,19 @@ def node_plan(state: AgentState) -> dict[str, Any]:
         events = _failed(state, "plan", exc)
         plan = heuristic_plan(analysis)
         ctx.plan = plan
-        return {"ctx": ctx, "plan": plan, "events": events}
+        return {"plan": plan, "events": events}
     ctx.plan = plan
-    events = _emit(
-        state,
-        "plan",
-        plan.approach[:160],
-        model=plan.model,
-        fallback=plan.fallback,
-        node="plan",
-    )
-    return {"ctx": ctx, "plan": plan, "events": events}
+    events = [
+        _emit(
+            state,
+            "plan",
+            plan.approach[:160],
+            model=plan.model,
+            fallback=plan.fallback,
+            node="plan",
+        )
+    ]
+    return {"plan": plan, "events": events}
 
 
 def node_generate(state: AgentState) -> dict[str, Any]:
@@ -168,7 +182,6 @@ def node_generate(state: AgentState) -> dict[str, Any]:
         gen_meta = {"model": "local-skeleton", "fallback": True, "tier": "none"}
         ctx.code = code
         return {
-            "ctx": ctx,
             "code": code,
             "best_code": code,
             "gen_meta": gen_meta,
@@ -176,7 +189,7 @@ def node_generate(state: AgentState) -> dict[str, Any]:
             "events": events,
         }
     ctx.code = code
-    events = _emit(
+    events = [_emit(
         state,
         "generate",
         f"python chars={len(code)} model={gen_meta.get('model')} "
@@ -184,9 +197,8 @@ def node_generate(state: AgentState) -> dict[str, Any]:
         f"cost=${float(gen_meta.get('cost_usd') or 0.0):.4f}",
         node="generate",
         **gen_meta,
-    )
+    )]
     return {
-        "ctx": ctx,
         "code": code,
         "best_code": code,
         "gen_meta": gen_meta,
@@ -202,15 +214,11 @@ def node_tests(state: AgentState) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         events = _failed(state, "tests", exc)
         ctx.tests = list(ctx.tests or [])
-        return {"ctx": ctx, "tests": ctx.tests, "events": events}
-    events = _emit(
-        state,
-        "tests",
-        tests_tool.summary,
-        used=tests_tool.used,
-        node="tests",
-    )
-    return {"ctx": ctx, "tests": ctx.tests, "events": events}
+        return {"tests": ctx.tests, "events": events}
+    events = [
+        _emit(state, "tests", tests_tool.summary, used=tests_tool.used, node="tests")
+    ]
+    return {"tests": ctx.tests, "events": events}
 
 
 def _report_from_run(run, code: str, analysis: Analysis, tests: list) -> VerifyReport:
@@ -241,21 +249,15 @@ def node_verify(state: AgentState) -> dict[str, Any]:
         )
         ctx.last_failure = report
         return {
-            "ctx": ctx,
             "report": report,
             "best_code": state.get("best_code") or ctx.code,
             "best_report": state.get("best_report") or report,
             "events": events,
         }
     ctx.last_failure = None if report.ok else report
-    events = _emit(
-        state,
-        "verify",
-        report.summary,
-        used=run.used,
-        ok=report.ok,
-        node="verify",
-    )
+    events = [
+        _emit(state, "verify", report.summary, used=run.used, ok=report.ok, node="verify")
+    ]
     best_report = state.get("best_report") or report
     if _report_score(report) >= _report_score(best_report):
         best_code = ctx.code
@@ -263,7 +265,6 @@ def node_verify(state: AgentState) -> dict[str, Any]:
     else:
         best_code = state.get("best_code") or ctx.code
     return {
-        "ctx": ctx,
         "report": report,
         "best_code": best_code,
         "best_report": best_report,
@@ -275,12 +276,9 @@ def node_repair(state: AgentState) -> dict[str, Any]:
     ctx = _sync_ctx(state)
     inspect = maybe_run(InspectFailureTool(), ctx)
     attempt = int(state.get("repair_attempt") or 0) + 1
-    events = _emit(state, "repair", inspect.summary, used=inspect.used, node="repair")
-    events = _emit(
-        {**state, "events": events},
-        "repair",
-        f"attempt {attempt}/{config.MAX_REPAIRS}",
-        node="repair",
+    events = [_emit(state, "repair", inspect.summary, used=inspect.used, node="repair")]
+    events.append(
+        _emit(state, "repair", f"attempt {attempt}/{config.MAX_REPAIRS}", node="repair")
     )
     try:
         candidate, repair_meta = repair_solution(
@@ -295,9 +293,8 @@ def node_repair(state: AgentState) -> dict[str, Any]:
         candidate_report = verify(candidate, state["analysis"], state.get("tests") or [])
     except Exception as exc:  # noqa: BLE001
         # Burn the attempt so the verify -> repair edge still terminates.
-        events = _failed({**state, "events": events}, "repair", exc)
+        events += _failed(state, "repair", exc)
         return {
-            "ctx": ctx,
             "code": state.get("best_code") or state.get("code") or "",
             "report": state.get("best_report") or state["report"],
             "best_code": state.get("best_code") or state.get("code") or "",
@@ -313,11 +310,13 @@ def node_repair(state: AgentState) -> dict[str, Any]:
         code, report = candidate, candidate_report
         best_code, best_report = code, report
     else:
-        events = _emit(
-            {**state, "events": events},
-            "repair",
-            "rejected worse candidate; kept previous best",
-            node="repair",
+        events.append(
+            _emit(
+                state,
+                "repair",
+                "rejected worse candidate; kept previous best",
+                node="repair",
+            )
         )
         code, report = best_code, best_report
     ctx.code = code
@@ -334,16 +333,10 @@ def node_repair(state: AgentState) -> dict[str, Any]:
             "cost_usd": repair_meta.get("cost_usd"),
         }
     )
-    events = _emit(
-        {**state, "events": events},
-        "verify",
-        report.summary,
-        ok=report.ok,
-        repair=attempt,
-        node="repair",
+    events.append(
+        _emit(state, "verify", report.summary, ok=report.ok, repair=attempt, node="repair")
     )
     return {
-        "ctx": ctx,
         "code": code,
         "report": report,
         "best_code": best_code,
@@ -369,7 +362,6 @@ def node_emit_rust(state: AgentState) -> dict[str, Any]:
         events = _failed(state, "emit_rust", exc)
         # No Rust program: node_write falls back to the Python prototype.
         return {
-            "ctx": ctx,
             "rust_code": "",
             "rust_meta": {"model": "none", "fallback": True, "kind": "rust"},
             "rust_report": VerifyReport(
@@ -378,13 +370,13 @@ def node_emit_rust(state: AgentState) -> dict[str, Any]:
             "events": events,
         }
     ctx.rust_code = rust_code
-    events = _emit(
+    events = [_emit(
         state,
         "emit_rust",
         f"chars={len(rust_code)} model={rust_meta.get('model')}",
         node="emit_rust",
         **rust_meta,
-    )
+    )]
     rust_report = rust_static_check(rust_code)
     deadline = state["deadline"]
     if not rust_report.ok and deadline.can_repair() and not deadline.late():
@@ -400,15 +392,16 @@ def node_emit_rust(state: AgentState) -> dict[str, Any]:
         rust_meta["repair"] = rust_fix
         rust_report = rust_static_check(rust_code)
         ctx.rust_code = rust_code
-        events = _emit(
-            {**state, "events": events},
-            "emit_rust",
-            rust_report.summary,
-            ok=rust_report.ok,
-            node="emit_rust",
+        events.append(
+            _emit(
+                state,
+                "emit_rust",
+                rust_report.summary,
+                ok=rust_report.ok,
+                node="emit_rust",
+            )
         )
     return {
-        "ctx": ctx,
         "rust_code": rust_code,
         "rust_meta": rust_meta,
         "rust_report": rust_report,
@@ -426,19 +419,15 @@ def node_write(state: AgentState) -> dict[str, Any]:
     ctx.code = code
     ctx.last_failure = None if report.ok else report
     bench = maybe_run(BenchmarkSolutionTool(), ctx)
-    events = _emit(
-        state,
-        "write",
-        bench.summary,
-        used=bench.used,
-        node="write",
-    )
+    events = [_emit(state, "write", bench.summary, used=bench.used, node="write")]
     if deadline.remaining() < config.RESERVE_S:
-        events = _emit(
-            {**state, "events": events},
-            "write",
-            "reserve reached; writing best solution so far",
-            node="write",
+        events.append(
+            _emit(
+                state,
+                "write",
+                "reserve reached; writing best solution so far",
+                node="write",
+            )
         )
 
     out_dir = Path(state["out_dir"])
@@ -499,18 +488,20 @@ def node_write(state: AgentState) -> dict[str, Any]:
         "rust_verify": rust_report.to_dict() if rust_report else None,
         "repairs": state.get("repairs") or [],
         "benchmark": bench.data if bench.used else {"used": False, "reason": bench.reason_skipped},
-        "events": events,
+        "events": list(state.get("events") or []) + events,
         "graph": "langgraph",
     }
     meta_path = out_dir / f"{stem}.meta.json"
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    events = _emit(
-        {**state, "events": events},
-        "write",
-        f"{solution_path.name} verified={verified} cost=${USAGE.cost_usd:.4f}",
-        node="write",
+    events.append(
+        _emit(
+            state,
+            "write",
+            f"{solution_path.name} verified={verified} cost=${USAGE.cost_usd:.4f}",
+            node="write",
+        )
     )
-    meta["events"] = events
+    meta["events"] = list(state.get("events") or []) + events
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return {"meta": meta, "events": events, "code": code, "report": report}
 
@@ -537,7 +528,15 @@ def _after_verify(state: AgentState) -> str:
     return "write"
 
 
-def build_graph():
+def build_graph(parallel: Optional[bool] = None):
+    """Compile the pipeline.
+
+    With `parallel`, generation and test-writing fan out from the plan and are
+    joined at verify: the two stages share no data, so the only thing the old
+    sequential edge bought was a longer critical path.
+    """
+    if parallel is None:
+        parallel = config.PARALLEL_STAGES
     graph = StateGraph(AgentState)
     graph.add_node("analyze", node_analyze)
     graph.add_node("plan", node_plan)
@@ -550,7 +549,11 @@ def build_graph():
     graph.set_entry_point("analyze")
     graph.add_edge("analyze", "plan")
     graph.add_edge("plan", "generate")
-    graph.add_edge("generate", "tests")
+    if parallel:
+        graph.add_edge("plan", "tests")
+        graph.add_edge("generate", "verify")
+    else:
+        graph.add_edge("generate", "tests")
     graph.add_edge("tests", "verify")
     graph.add_conditional_edges(
         "verify",
@@ -563,11 +566,11 @@ def build_graph():
     return graph.compile()
 
 
-_COMPILED = None
+_COMPILED: dict[bool, Any] = {}
 
 
 def compiled_graph():
-    global _COMPILED
-    if _COMPILED is None:
-        _COMPILED = build_graph()
-    return _COMPILED
+    key = bool(config.PARALLEL_STAGES)
+    if key not in _COMPILED:
+        _COMPILED[key] = build_graph(key)
+    return _COMPILED[key]

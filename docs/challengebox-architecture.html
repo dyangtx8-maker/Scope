@@ -30,6 +30,10 @@
                  justify-content: center; font-size: 13px; color: #fff; flex: none; }
   .step b { font-size: 13.5px; display: block; }
   .step span { font-size: 11.5px; color: #475569; }
+  .fork { display: flex; gap: 6px; }
+  .fork .step { flex: 1; min-width: 0; }
+  .fork .step span { font-size: 10.5px; }
+  .forklabel { text-align: center; font-size: 10px; color: #64748b; font-style: italic; }
   .arrow { text-align: center; font-size: 9px; color: #94a3b8; height: 7px; line-height: 7px; }
   .blue   { border-left-color: #2563eb; } .blue   .glyph { background: #2563eb; }
   .green  { border-left-color: #16a34a; } .green  .glyph { background: #16a34a; }
@@ -81,9 +85,11 @@
     <div class="arrow">&#9660;</div>
     <div class="step green"><div class="glyph">&#9733;</div><div><b>Plan</b><span>Claude Haiku 4.5 &mdash; cheap tier, JSON schema</span></div></div>
     <div class="arrow">&#9660;</div>
-    <div class="step orange"><div class="glyph">&lt;/&gt;</div><div><b>Generate</b><span>Claude Sonnet 5 &middot; Opus 5 on hard problems</span></div></div>
-    <div class="arrow">&#9660;</div>
-    <div class="step green"><div class="glyph">&#9636;</div><div><b>Tests</b><span>local spec + optional Claude Haiku adversarial</span></div></div>
+    <div class="fork">
+      <div class="step orange"><div class="glyph">&lt;/&gt;</div><div><b>Generate</b><span>Sonnet 5 &middot; Opus 5 on hard</span></div></div>
+      <div class="step green"><div class="glyph">&#9636;</div><div><b>Tests</b><span>spec + Haiku adversarial</span></div></div>
+    </div>
+    <div class="forklabel">&#8741; run in parallel, joined at verify</div>
     <div class="arrow">&#9660;</div>
     <div class="step blue"><div class="glyph">&#10003;</div><div><b>Verify</b><span>local syntax, stub check, run tests</span></div></div>
     <div class="arrow">&#9660;</div>

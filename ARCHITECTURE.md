@@ -12,8 +12,8 @@ The control loop is a small **LangGraph** state machine. The brains of each step
 problem JSON
   → analyze (local)
   → plan (Claude Haiku 4.5)
-  → generate (Claude Sonnet 5, Opus 5 on hard problems)
-  → tests (local spec + optional Claude Haiku adversarial)
+  ├─ generate (Claude Sonnet 5, Opus 5 on hard problems) ─┐   in parallel
+  └─ tests (local spec + optional Claude Haiku adversarial)┘
   → verify (local)
        ├─ fail + time left → repair (Claude, escalating tier) → verify
        ├─ Rust target → emit fn main() (Claude)
@@ -74,6 +74,53 @@ could not parse, for $0.098, in the same wall clock. Both JSON stages therefore 
 a schema, and `chat()` still falls back to prompted JSON if the CLI ever rejects one.
 
 **Timeouts.** Every call is bounded by `min(CLI_TIMEOUT_S, remaining - RESERVE_S)`. Under `CLI_MIN_CALL_S` the stage does not call a model at all and takes its local fallback, so the writer always keeps its reserve. A CLI turn costs process start-up plus thinking time, so `LATE_PHASE_S` (70s), `MIN_REPAIR_S` (60s) and `ADVERSARIAL_MIN_S` (90s) were raised from their HTTP-era values: each one now has to cover a whole round trip, not a fast API call.
+
+## Parallelism
+
+Two independent axes, both off by default only where they cost something.
+
+**Stages.** `tests` reads the analysis and the plan; it never reads the
+generated code. The sequential `generate → tests` edge was wiring, not a data
+dependency, so `plan` now fans out to both and `verify` joins them. Same
+calls, same cost, shorter critical path. Measured on `problem_01`:
+
+| | sequential | parallel |
+|---|---|---|
+| plan | 121s | 121s |
+| generate / tests | 55s then 83s | overlapped, 61s |
+| total | **259s** | **182s** |
+| benchmark | skipped, no time left | ran |
+| cost | $0.193 | $0.197 |
+
+The 77s does not just come off the clock - it goes back into the deadline
+budget, which is why the run that used to skip its benchmark now has time for
+it, and for a repair round if verification had failed.
+
+Two consequences fell out of the fan-out and are worth knowing before editing
+a node. `events` is an `Annotated[list, operator.add]` reducer, so nodes
+return **only the events they produced**; returning the accumulated list would
+duplicate it. And no node returns `ctx` any more - it is one shared mutable
+object, so two branches returning it is a concurrent write to one key, which
+LangGraph rejects. `_sync_ctx` takes a lock because LangGraph runs sync nodes
+on a thread pool.
+
+Set `CLAUDE_PARALLEL_STAGES=0` to go back to the sequential edge on a machine
+where two concurrent CLI processes contend.
+
+**Problems.** `solve.py --all --jobs N` solves N problems at once in a process
+pool. Each problem keeps its own independent deadline and writes to its own
+files, so this is free parallelism - no extra model calls. Processes rather
+than threads because `models.USAGE` is a module-global meter that
+`solve_file` resets on entry; two problems sharing an interpreter would
+clobber each other's cost accounting. Worker output is captured and replayed
+as one block per problem, because interleaved stage lines from four problems
+at once are unreadable.
+
+The ceiling is the machine, not the code. Every `claude -p` is a full Node
+process, and each problem's deadline starts when its worker picks it up, so
+oversubscribing spends the deadline on contention: during development two
+concurrent pipelines turned a 20s Haiku call into 114s. 4 is a sane ceiling on
+a laptop.
 
 ## Measured behaviour
 

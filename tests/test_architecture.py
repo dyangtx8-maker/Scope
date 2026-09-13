@@ -32,6 +32,8 @@ from agent.models import (
 )
 from agent.orchestrator import Deadline, solve_problem
 from agent.graph import build_graph
+from solve import _outcome as outcome
+from solve import _solve_one as solve_worker
 from solve import main as solve_main
 from agent.tools import BenchmarkSolutionTool, ToolContext, maybe_run
 from agent.verifier import looks_like_stub, spec_cases, syntax_check, verify
@@ -291,6 +293,74 @@ class ArchitectureTests(unittest.TestCase):
                 code = solve_main(["/nonexistent-problem.json", "--out", tmp])
         self.assertEqual(code, 3)
         self.assertIn("SALVAGED", out.getvalue())
+
+    def test_parallel_mode_fans_generate_and_tests_out_of_plan(self) -> None:
+        def edges(parallel):
+            return {
+                (e.source, e.target)
+                for e in build_graph(parallel).get_graph().edges
+                if e.source in {"plan", "generate", "tests"}
+            }
+
+        self.assertEqual(
+            edges(False), {("plan", "generate"), ("generate", "tests"), ("tests", "verify")}
+        )
+        self.assertEqual(
+            edges(True),
+            {
+                ("plan", "generate"),
+                ("plan", "tests"),
+                ("generate", "verify"),
+                ("tests", "verify"),
+            },
+        )
+
+    def test_both_graph_shapes_produce_the_same_run(self) -> None:
+        """Fanning out must not drop, duplicate or reorder any event."""
+        import tempfile
+
+        from agent import generator, graph as graph_module
+
+        real_available = models.cli_available
+        real_sleep = generator.time.sleep
+        models.cli_available = lambda *a, **k: False  # local fallbacks: fast and free
+        generator.time.sleep = lambda _s: None
+        runs = {}
+        try:
+            for parallel in (False, True):
+                config.PARALLEL_STAGES = parallel
+                graph_module._COMPILED.clear()
+                with tempfile.TemporaryDirectory() as tmp:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        runs[parallel] = solve_problem(str(SAMPLE), out_dir=Path(tmp))
+        finally:
+            models.cli_available = real_available
+            generator.time.sleep = real_sleep
+            config.PARALLEL_STAGES = True
+            graph_module._COMPILED.clear()
+
+        for parallel, meta in runs.items():
+            stages = [e["stage"] for e in meta["events"]]
+            self.assertEqual(stages[:6], ["analyze", "analyze", "plan", "generate", "tests", "verify"], parallel)
+            self.assertEqual(stages[-1], "write", parallel)
+            self.assertEqual(len(meta["repairs"]), config.MAX_REPAIRS, parallel)
+        self.assertEqual(
+            [e["stage"] for e in runs[False]["events"]],
+            [e["stage"] for e in runs[True]["events"]],
+        )
+
+    def test_worker_body_captures_output_and_never_raises(self) -> None:
+        record = solve_worker("/nonexistent-problem.json", "/tmp")
+        self.assertIsNotNone(record["meta"])  # salvaged rather than raised
+        self.assertTrue(record["meta"]["salvaged"])
+        self.assertIn("run failed", record["log"])  # the log came back, not stdout
+
+    def test_outcome_classifies_every_ending(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(outcome(Path("p"), None, "boom"), "crashed")
+            self.assertEqual(outcome(Path("p"), {"salvaged": True}, ""), "salvaged")
+            self.assertEqual(outcome(Path("p"), {"verified": True}, ""), "ok")
+            self.assertEqual(outcome(Path("p"), {"verified": False}, ""), "unverified")
 
     def test_windows_prefers_the_launchable_shim(self) -> None:
         self.assertEqual(models.bin_candidates("claude", windows=False), ["claude"])

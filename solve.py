@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import sys
 import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 # Redirected output on Windows uses the locale codec, which cannot encode the
@@ -32,6 +35,45 @@ def _problem_files() -> list[Path]:
     return sorted(directory.glob("*.json"))
 
 
+def _solve_one(problem: str, out_dir: str) -> dict:
+    """Worker body for --jobs.
+
+    Output is captured rather than streamed: interleaved stage lines from
+    several problems at once are unreadable, so each problem's log is replayed
+    as one block when it finishes. Returns a plain dict because it has to cross
+    a process boundary.
+    """
+    buffer = io.StringIO()
+    record: dict = {"meta": None, "error": "", "traceback": "", "log": ""}
+    try:
+        with contextlib.redirect_stdout(buffer):
+            record["meta"] = solve_problem(problem, out_dir=Path(out_dir))
+    except Exception as exc:  # noqa: BLE001
+        record["error"] = f"{type(exc).__name__}: {exc}"
+        record["traceback"] = traceback.format_exc()
+    record["log"] = buffer.getvalue()
+    return record
+
+
+def _outcome(path: Path, meta: dict | None, error: str) -> str:
+    """Print the one-line verdict for a finished problem and classify it."""
+    if meta is None:
+        print(f"FAILED {path}: {error}", flush=True)
+        return "crashed"
+    if meta.get("salvaged"):
+        print(
+            f"SALVAGED {path}: {meta.get('error')} -> {meta.get('solution')}",
+            flush=True,
+        )
+        return "salvaged"
+    print(
+        f"done verified={meta['verified']} elapsed={meta.get('elapsed_s')}s "
+        f"-> {meta.get('solution')}",
+        flush=True,
+    )
+    return "ok" if meta.get("verified") else "unverified"
+
+
 def _routing() -> str:
     return (
         f"runtime={config.RUNTIME} bin={config.CLAUDE_BIN}\n"
@@ -50,6 +92,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--all", action="store_true", help="Run every fixture in problems/")
     parser.add_argument("--list", action="store_true", help="List fixture paths")
     parser.add_argument("--models", action="store_true", help="Show the model routing table")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Solve N problems at once. Each problem keeps its own deadline, so "
+            "oversubscribing the machine spends that deadline on contention; 4 "
+            "is a sane ceiling on a laptop."
+        ),
+    )
     parser.add_argument(
         "--check",
         action="store_true",
@@ -96,35 +149,40 @@ def main(argv: list[str] | None = None) -> int:
     if not targets:
         return 2
 
-    unverified = 0
-    salvaged = 0
-    crashed = 0
-    for path in targets:
-        print(f"\n=== {path} ===", flush=True)
-        try:
-            meta = solve_problem(str(path), out_dir=Path(args.out))
-            if meta.get("salvaged"):
-                salvaged += 1
-                print(
-                    f"SALVAGED {path}: {meta.get('error')} -> {meta.get('solution')}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"done verified={meta['verified']} elapsed={meta.get('elapsed_s')}s "
-                    f"-> {meta.get('solution')}",
-                    flush=True,
-                )
-                if not meta.get("verified"):
-                    unverified += 1
-        except Exception as exc:  # noqa: BLE001
-            crashed += 1
-            print(f"FAILED {path}: {type(exc).__name__}: {exc}", flush=True)
-            # Without this the next person debugging gets a bare message and
-            # no idea which line raised it.
-            traceback.print_exc()
+    tally = {"ok": 0, "unverified": 0, "salvaged": 0, "crashed": 0}
+    jobs = max(1, args.jobs)
 
-    solved = len(targets) - unverified - salvaged - crashed
+    if jobs > 1 and len(targets) > 1:
+        workers = min(jobs, len(targets))
+        print(f"solving {len(targets)} problems, {workers} at a time", flush=True)
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            pending = {
+                pool.submit(_solve_one, str(path), args.out): path for path in targets
+            }
+            for future in as_completed(pending):
+                path = pending[future]
+                record = future.result()
+                print(f"\n=== {path} ===", flush=True)
+                print(record["log"], end="", flush=True)
+                if record["traceback"]:
+                    print(record["traceback"], file=sys.stderr, flush=True)
+                tally[_outcome(path, record["meta"], record["error"])] += 1
+    else:
+        for path in targets:
+            print(f"\n=== {path} ===", flush=True)
+            try:
+                meta = solve_problem(str(path), out_dir=Path(args.out))
+                tally[_outcome(path, meta, "")] += 1
+            except Exception as exc:  # noqa: BLE001
+                # Without this the next person debugging gets a bare message
+                # and no idea which line raised it.
+                traceback.print_exc()
+                tally[_outcome(path, None, f"{type(exc).__name__}: {exc}")] += 1
+
+    unverified = tally["unverified"]
+    salvaged = tally["salvaged"]
+    crashed = tally["crashed"]
+    solved = tally["ok"]
     print(
         f"\n{solved}/{len(targets)} verified"
         + (f", {unverified} unverified" if unverified else "")

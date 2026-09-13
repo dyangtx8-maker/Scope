@@ -28,6 +28,7 @@ class ToolContext:
     last_failure: Any = None
     remaining_s: float = 0.0
     notes: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Tool:
