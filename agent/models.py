@@ -368,20 +368,28 @@ def _invoke(argv: list[str], prompt: str, timeout_s: float) -> tuple[Optional[di
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # Without these, text mode uses the locale codec: cp1252 on a
+            # stock Windows box, where the node CLI's UTF-8 arrives mangled
+            # ("∈" -> "âˆˆ") or kills the reader thread outright.
+            encoding="utf-8",
+            errors="replace",
             cwd=_workdir(),
             env=_child_env(),
             start_new_session=True,
         )
     except FileNotFoundError:
         return None, f"cannot execute {argv[0]!r} (set CLAUDE_BIN to its full path)"
-    except OSError as exc:
-        return None, f"spawn failed: {exc}"
+    except Exception as exc:  # noqa: BLE001 - a bad argv raises ValueError on Windows
+        return None, f"spawn failed: {type(exc).__name__}: {exc}"
 
     try:
         stdout, stderr = process.communicate(input=prompt, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         _kill(process)
         return None, f"timeout after {timeout_s:.0f}s"
+    except Exception as exc:  # noqa: BLE001 - never leave the child running
+        _kill(process)
+        return None, f"transport failure: {type(exc).__name__}: {exc}"
 
     payload = parse_result(stdout)
     if payload is None:

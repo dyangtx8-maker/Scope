@@ -133,6 +133,9 @@ python3 tests/test_architecture.py         # no network, no CLI needed
 python3 solve.py problems/problem_01.json
 ```
 
+Exit codes: `0` every problem verified, `1` a solution was written but failed
+local verification, `2` bad usage, `3` a run crashed or had to be salvaged.
+
 `solve.py --models` prints the routing table. Every model, timeout and spend
 cap is overridable from the environment or `.env` — see `.env.example`.
 

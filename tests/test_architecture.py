@@ -30,8 +30,9 @@ from agent.models import (
     provider_for,
     reset_usage,
 )
-from agent.orchestrator import Deadline
+from agent.orchestrator import Deadline, solve_problem
 from agent.graph import build_graph
+from solve import main as solve_main
 from agent.tools import BenchmarkSolutionTool, ToolContext, maybe_run
 from agent.verifier import looks_like_stub, spec_cases, syntax_check, verify
 
@@ -196,6 +197,100 @@ class ArchitectureTests(unittest.TestCase):
             os.environ.pop("CHALLENGEBOX_TEST_NUMBER", None)
         self.assertEqual(value, 7)
         self.assertIn("not a number", err.getvalue())
+
+    def test_cli_pipes_are_pinned_to_utf8(self) -> None:
+        """Locale codecs mangle the CLI's UTF-8 on Windows (cp1252)."""
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, argv, **kwargs):
+                captured.update(kwargs)
+                raise FileNotFoundError("not really spawning")
+
+        real = models.subprocess.Popen
+        models.subprocess.Popen = FakePopen
+        try:
+            payload, error = models._invoke(["claude"], "prompt", 30.0)
+        finally:
+            models.subprocess.Popen = real
+        self.assertIsNone(payload)
+        self.assertIn("cannot execute", error)
+        self.assertEqual(captured.get("encoding"), "utf-8")
+        self.assertEqual(captured.get("errors"), "replace")
+
+    def test_env_file_survives_bom_and_codepage(self) -> None:
+        import codecs
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            # A UTF-8 BOM used to be glued onto the first key name.
+            path.write_bytes(codecs.BOM_UTF8 + b"ANTHROPIC_API_KEY=sk-bom\n")
+            self.assertEqual(config.load_env(path)["ANTHROPIC_API_KEY"], "sk-bom")
+            # PowerShell 5.1's `>` writes UTF-16LE, which is not UTF-8 at all.
+            path.write_bytes(codecs.BOM_UTF16_LE + "CLAUDE_BIN=x.cmd\n".encode("utf-16-le"))
+            self.assertEqual(config.load_env(path)["CLAUDE_BIN"], "x.cmd")
+            # An editor-saved code page file keeps its characters.
+            path.write_bytes("CLAUDE_CLI_CWD=C:\\M\u00fcller\n".encode("cp1252"))
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(config.load_env(path)["CLAUDE_CLI_CWD"], "C:\\M\u00fcller")
+
+    def test_a_node_failure_still_writes_a_solution(self) -> None:
+        """A crash in one stage must not cost the whole problem."""
+        import tempfile
+
+        from agent import graph as graph_module
+
+        boom = AttributeError("module 'os' has no attribute 'killpg'")
+        real_generate = graph_module.generate_python
+        real_available = models.cli_available
+        graph_module.generate_python = lambda *a, **k: (_ for _ in ()).throw(boom)
+        models.cli_available = lambda *a, **k: False
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    meta = solve_problem(str(SAMPLE), out_dir=Path(tmp))
+                written = sorted(p.name for p in Path(tmp).glob("*"))
+        finally:
+            graph_module.generate_python = real_generate
+            models.cli_available = real_available
+        self.assertEqual(len(written), 2, written)
+        self.assertFalse(meta["verified"])
+
+    def test_a_graph_failure_salvages_the_best_candidate(self) -> None:
+        """Whatever the guards cannot absorb still reaches disk."""
+        import tempfile
+
+        from agent import orchestrator as orch
+
+        class Exploding:
+            def invoke(self, state):
+                state["ctx"].code = "def keep_me():\n    return 1\n"
+                raise AttributeError("module 'os' has no attribute 'killpg'")
+
+        real = orch.compiled_graph
+        orch.compiled_graph = lambda: Exploding()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    meta = solve_problem(str(SAMPLE), out_dir=Path(tmp))
+                solution = (Path(tmp) / f"{SAMPLE.stem}.py").read_text(encoding="utf-8")
+        finally:
+            orch.compiled_graph = real
+        self.assertTrue(meta["salvaged"])
+        self.assertFalse(meta["verified"])
+        self.assertIn("killpg", meta["error"])
+        self.assertIn("AttributeError", meta["traceback"])
+        self.assertIn("def keep_me", solution)
+
+    def test_exit_code_reports_a_run_that_wrote_nothing(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                code = solve_main(["/nonexistent-problem.json", "--out", tmp])
+        self.assertEqual(code, 3)
+        self.assertIn("SALVAGED", out.getvalue())
 
     def test_windows_prefers_the_launchable_shim(self) -> None:
         self.assertEqual(models.bin_candidates("claude", windows=False), ["claude"])

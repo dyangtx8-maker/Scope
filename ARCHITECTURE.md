@@ -109,7 +109,43 @@ deadline.
 
 **Repair**. Up to 3 attempts, resuming the generation session. Keep the higher-scoring candidate. Near the deadline (`LATE_PHASE_S` / `MIN_REPAIR_S`), skip more LLM work and write whatever is best.
 
-**Write**. Always emits a file before the clock hits `RESERVE_S`. `.meta.json` records traps, plan, usage by model/tier, the dollar cost the CLI reported, graph node names, and every timed event.
+**Write**. Always emits a file before the clock hits `RESERVE_S`.
+
+## Failure containment
+
+A missing solution file scores zero, so an unexpected exception must never be
+the reason one is absent. Two layers:
+
+* **Node guards.** `plan`, `generate`, `tests`, `verify`, `repair` and
+  `emit_rust` catch anything their stage raises, log
+  `node failed, falling back locally: <error>`, and substitute the local
+  fallback that stage already has - the heuristic plan, the stdlib skeleton,
+  the spec-only test list. The graph keeps running and `write` still executes.
+* **Salvage.** `Orchestrator.solve_file` wraps the whole run, `invoke`
+  included. Anything the guards cannot absorb still writes the in-flight
+  candidate from the shared `ToolContext` plus a `.meta.json` carrying
+  `salvaged: true`, the error, the traceback and the events so far.
+
+`solve.py` prints the traceback for a genuine crash rather than one bare line,
+and its exit code says what happened: `0` all verified, `1` written but
+unverified, `2` bad usage, `3` a run that crashed or had to be salvaged.
+
+## Encoding
+
+All I/O is pinned to UTF-8 rather than the platform's locale codec, because on
+a stock Windows box that codec is cp1252:
+
+* the CLI subprocess pipes (`encoding="utf-8", errors="replace"`) - without
+  this the node CLI's UTF-8 reply arrives as mojibake (`∈` reads as `âˆˆ`),
+  a reply containing a character outside cp1252 kills the reader thread and
+  the call is reported as empty output, and a prompt containing one raises
+  `UnicodeEncodeError` out of `communicate`;
+* problem JSON, read as `utf-8-sig` so an editor's BOM is tolerated;
+* `.env`, decoded by sniffing the BOM first (a UTF-8 BOM used to be glued onto
+  the first key name; PowerShell 5.1's `>` writes UTF-16LE), then UTF-8, then
+  the local code page - saying on stderr when it had to guess;
+* `solve.py` reconfigures stdout and stderr, so a redirected run cannot die on
+  an em dash. `.meta.json` records traps, plan, usage by model/tier, the dollar cost the CLI reported, graph node names, and every timed event.
 
 ## Tools
 

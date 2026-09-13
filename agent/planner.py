@@ -43,7 +43,7 @@ PLAN_SCHEMA = {
 }
 
 
-def _heuristic_plan(analysis: Analysis) -> Plan:
+def heuristic_plan(analysis: Analysis) -> Plan:
     traps = (
         analysis.algorithmic_traps
         + analysis.wording_traps
@@ -81,7 +81,7 @@ def _heuristic_plan(analysis: Analysis) -> Plan:
 
 
 def plan_solution(analysis: Analysis, remaining_s: float) -> Plan:
-    fallback = _heuristic_plan(analysis)
+    fallback = heuristic_plan(analysis)
     if remaining_s < 25:
         return fallback
 

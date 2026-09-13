@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
 from . import config
 from .analyzer import Analysis
-from .generator import generate_python, generate_rust
+from .generator import generate_python, generate_rust, python_skeleton
 from .models import USAGE
-from .planner import plan_solution
+from .planner import heuristic_plan, plan_solution
 from .repair import repair_solution
 from .tools import (
     AnalyzeConstraintsTool,
@@ -80,6 +80,18 @@ def _emit(state: AgentState, stage: str, detail: str, **extra: Any) -> list:
     return events
 
 
+def _failed(state: AgentState, stage: str, exc: Exception) -> list:
+    """Log a node failure and keep going: a missing file scores zero."""
+    detail = f"{type(exc).__name__}: {exc}"
+    return _emit(
+        state,
+        stage,
+        f"node failed, falling back locally: {detail}"[:300],
+        node=stage,
+        error=detail,
+    )
+
+
 def _sync_ctx(state: AgentState) -> ToolContext:
     ctx: ToolContext = state["ctx"]
     ctx.remaining_s = state["deadline"].remaining()
@@ -125,7 +137,13 @@ def node_analyze(state: AgentState) -> dict[str, Any]:
 def node_plan(state: AgentState) -> dict[str, Any]:
     ctx = _sync_ctx(state)
     analysis: Analysis = state["analysis"]
-    plan = plan_solution(analysis, state["deadline"].remaining())
+    try:
+        plan = plan_solution(analysis, state["deadline"].remaining())
+    except Exception as exc:  # noqa: BLE001
+        events = _failed(state, "plan", exc)
+        plan = heuristic_plan(analysis)
+        ctx.plan = plan
+        return {"ctx": ctx, "plan": plan, "events": events}
     ctx.plan = plan
     events = _emit(
         state,
@@ -140,9 +158,23 @@ def node_plan(state: AgentState) -> dict[str, Any]:
 
 def node_generate(state: AgentState) -> dict[str, Any]:
     ctx = _sync_ctx(state)
-    code, gen_meta = generate_python(
-        state["analysis"], state["plan"], state["deadline"].remaining()
-    )
+    try:
+        code, gen_meta = generate_python(
+            state["analysis"], state["plan"], state["deadline"].remaining()
+        )
+    except Exception as exc:  # noqa: BLE001
+        events = _failed(state, "generate", exc)
+        code = python_skeleton(state["analysis"])
+        gen_meta = {"model": "local-skeleton", "fallback": True, "tier": "none"}
+        ctx.code = code
+        return {
+            "ctx": ctx,
+            "code": code,
+            "best_code": code,
+            "gen_meta": gen_meta,
+            "session_id": "",
+            "events": events,
+        }
     ctx.code = code
     events = _emit(
         state,
@@ -165,7 +197,12 @@ def node_generate(state: AgentState) -> dict[str, Any]:
 
 def node_tests(state: AgentState) -> dict[str, Any]:
     ctx = _sync_ctx(state)
-    tests_tool = maybe_run(GenerateTestsTool(), ctx)
+    try:
+        tests_tool = maybe_run(GenerateTestsTool(), ctx)
+    except Exception as exc:  # noqa: BLE001
+        events = _failed(state, "tests", exc)
+        ctx.tests = list(ctx.tests or [])
+        return {"ctx": ctx, "tests": ctx.tests, "events": events}
     events = _emit(
         state,
         "tests",
@@ -192,8 +229,24 @@ def _report_from_run(run, code: str, analysis: Analysis, tests: list) -> VerifyR
 
 def node_verify(state: AgentState) -> dict[str, Any]:
     ctx = _sync_ctx(state)
-    run = maybe_run(RunSolutionTool(), ctx)
-    report = _report_from_run(run, ctx.code, state["analysis"], ctx.tests)
+    try:
+        run = maybe_run(RunSolutionTool(), ctx)
+        report = _report_from_run(run, ctx.code, state["analysis"], ctx.tests)
+    except Exception as exc:  # noqa: BLE001
+        events = _failed(state, "verify", exc)
+        report = VerifyReport(
+            ok=False,
+            summary=f"verifier failed: {type(exc).__name__}",
+            hints=["The local verifier crashed; the candidate is unchecked."],
+        )
+        ctx.last_failure = report
+        return {
+            "ctx": ctx,
+            "report": report,
+            "best_code": state.get("best_code") or ctx.code,
+            "best_report": state.get("best_report") or report,
+            "events": events,
+        }
     ctx.last_failure = None if report.ok else report
     events = _emit(
         state,
@@ -229,16 +282,30 @@ def node_repair(state: AgentState) -> dict[str, Any]:
         f"attempt {attempt}/{config.MAX_REPAIRS}",
         node="repair",
     )
-    candidate, repair_meta = repair_solution(
-        state["analysis"],
-        state["plan"],
-        state.get("code") or "",
-        state["report"],
-        state["deadline"].remaining(),
-        attempt=attempt,
-        session_id=state.get("session_id") or "",
-    )
-    candidate_report = verify(candidate, state["analysis"], state.get("tests") or [])
+    try:
+        candidate, repair_meta = repair_solution(
+            state["analysis"],
+            state["plan"],
+            state.get("code") or "",
+            state["report"],
+            state["deadline"].remaining(),
+            attempt=attempt,
+            session_id=state.get("session_id") or "",
+        )
+        candidate_report = verify(candidate, state["analysis"], state.get("tests") or [])
+    except Exception as exc:  # noqa: BLE001
+        # Burn the attempt so the verify -> repair edge still terminates.
+        events = _failed({**state, "events": events}, "repair", exc)
+        return {
+            "ctx": ctx,
+            "code": state.get("best_code") or state.get("code") or "",
+            "report": state.get("best_report") or state["report"],
+            "best_code": state.get("best_code") or state.get("code") or "",
+            "best_report": state.get("best_report") or state["report"],
+            "repair_attempt": attempt,
+            "repairs": list(state.get("repairs") or []),
+            "events": events,
+        }
     best_code = state.get("best_code") or state.get("code") or ""
     best_report = state.get("best_report") or state["report"]
     kept = _report_score(candidate_report) >= _report_score(best_report)
@@ -290,13 +357,26 @@ def node_repair(state: AgentState) -> dict[str, Any]:
 
 def node_emit_rust(state: AgentState) -> dict[str, Any]:
     ctx = _sync_ctx(state)
-    rust_code, rust_meta = generate_rust(
-        state["analysis"],
-        state["plan"],
-        state.get("code") or "",
-        state["deadline"].remaining(),
-        session_id=state.get("session_id") or "",
-    )
+    try:
+        rust_code, rust_meta = generate_rust(
+            state["analysis"],
+            state["plan"],
+            state.get("code") or "",
+            state["deadline"].remaining(),
+            session_id=state.get("session_id") or "",
+        )
+    except Exception as exc:  # noqa: BLE001
+        events = _failed(state, "emit_rust", exc)
+        # No Rust program: node_write falls back to the Python prototype.
+        return {
+            "ctx": ctx,
+            "rust_code": "",
+            "rust_meta": {"model": "none", "fallback": True, "kind": "rust"},
+            "rust_report": VerifyReport(
+                ok=False, summary=f"rust emission failed: {type(exc).__name__}"
+            ),
+            "events": events,
+        }
     ctx.rust_code = rust_code
     events = _emit(
         state,

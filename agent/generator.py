@@ -10,7 +10,7 @@ from .models import chat, choose_tier, extract_code
 from .planner import Plan
 
 
-def _python_skeleton(analysis: Analysis) -> str:
+def python_skeleton(analysis: Analysis) -> str:
     sig = analysis.proto_signature or analysis.signature
     name = analysis.proto_entrypoint or analysis.entrypoint
     if analysis.io_mode == "stdin":
@@ -28,7 +28,7 @@ def _python_skeleton(analysis: Analysis) -> str:
     )
 
 
-def _rust_skeleton() -> str:
+def rust_skeleton() -> str:
     return (
         "use std::io::{self, Read};\n\n"
         "fn main() {\n"
@@ -44,7 +44,7 @@ def generate_python(
     remaining_s: float,
     session_id: str = "",
 ) -> tuple[str, dict]:
-    fallback = _python_skeleton(analysis)
+    fallback = python_skeleton(analysis)
     if remaining_s < 20:
         return fallback, {"model": "local-skeleton", "fallback": True, "tier": "none"}
 
@@ -127,7 +127,7 @@ def generate_rust(
     remaining_s: float,
     session_id: str = "",
 ) -> tuple[str, dict]:
-    fallback = _rust_skeleton()
+    fallback = rust_skeleton()
     if remaining_s < 25:
         return fallback, {"model": "local-skeleton", "fallback": True, "tier": "none", "kind": "rust"}
 

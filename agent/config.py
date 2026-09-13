@@ -7,6 +7,8 @@ Authentication, overload retries, and prompt caching are the CLI's job.
 
 from __future__ import annotations
 
+import codecs
+import locale
 import os
 import sys
 from pathlib import Path
@@ -37,11 +39,43 @@ def _clean_value(raw: str) -> str:
     return value
 
 
+def decode_env(data: bytes) -> str:
+    """Decode a .env file without ever raising.
+
+    Editors on Windows happily write a UTF-8 BOM, and PowerShell 5.1's `>`
+    writes UTF-16LE; both make a naive read either drop the first key or fail.
+    A file an editor saved in the local code page still decodes correctly,
+    and only a genuinely undecodable file loses bytes - loudly.
+    """
+    for bom, codec in (
+        (codecs.BOM_UTF32_LE, "utf-32"),
+        (codecs.BOM_UTF32_BE, "utf-32"),
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF16_LE, "utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16"),
+    ):
+        if data.startswith(bom):
+            try:
+                return data.decode(codec)
+            except (UnicodeDecodeError, LookupError):
+                break
+    for codec in ("utf-8", locale.getpreferredencoding(False), "cp1252"):
+        try:
+            text = data.decode(codec)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if codec != "utf-8":
+            print(f"config: .env is not UTF-8; read as {codec}", file=sys.stderr)
+        return text
+    print("config: .env is not decodable; undecodable bytes replaced", file=sys.stderr)
+    return data.decode("utf-8", errors="replace")
+
+
 def load_env(path: Path = ENV_PATH) -> dict[str, str]:
     """Parse a tiny KEY=value .env file. Missing file means empty settings."""
     env: dict[str, str] = {}
     try:
-        raw_text = path.read_text()
+        raw_text = decode_env(path.read_bytes())
     except OSError:
         return env
     for raw in raw_text.splitlines():

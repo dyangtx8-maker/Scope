@@ -68,7 +68,7 @@ class ReadProblemTool(Tool):
         import json
 
         path = Path(ctx.problem_path)
-        ctx.problem = json.loads(path.read_text())
+        ctx.problem = json.loads(path.read_text(encoding="utf-8-sig"))
         pid = ctx.problem.get("problem_id", path.stem)
         return ToolResult(
             name=self.name,
