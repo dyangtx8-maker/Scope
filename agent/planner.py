@@ -7,7 +7,7 @@ from typing import Any
 
 from . import config
 from .analyzer import Analysis
-from .models import chat, choose_tier, reply_json
+from .models import call_timeout, chat, choose_tier, reply_json
 
 
 @dataclass
@@ -128,6 +128,8 @@ def plan_solution(analysis: Analysis, remaining_s: float) -> Plan:
         ],
         tier=tier,
         remaining_s=remaining_s,
+        # The plan is a nice-to-have; it never gets the whole clock.
+        timeout_s=min(call_timeout(remaining_s), config.PLAN_MAX_S),
         json_mode=True,
         json_schema=PLAN_SCHEMA,
         fallback_text="",

@@ -152,8 +152,11 @@ def effort_for(tier: str, remaining_s: float = 0.0) -> str:
 
 def choose_tier(stage: str, difficulty: str, remaining_s: float, repair_attempt: int = 0) -> str:
     """Cost-aware routing. Codegen never uses the cheap tier."""
-    if stage in {"plan", "tests"}:
+    if stage == "plan":
         return "cheap"
+    if stage == "tests":
+        # Test cases are written by the same model that writes the code.
+        return "normal"
     if stage == "generate":
         if difficulty == "hard" and remaining_s >= 120:
             return "strong"
@@ -363,6 +366,29 @@ def payload_error(payload: dict[str, Any]) -> str:
 _LOG_LOCK = threading.Lock()
 
 
+def log_line(text: str) -> None:
+    """Append one line of run output to CLAUDE_PROMPT_LOG."""
+    path = config.PROMPT_LOG
+    if not path:
+        return
+    try:
+        with _LOG_LOCK, open(path, "a", encoding="utf-8") as handle:
+            handle.write(text.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def log_block(title: str, body: str) -> None:
+    """Append a titled block - test cases, verify results - to the run log."""
+    if not config.PROMPT_LOG:
+        return
+    log_line("-" * 78)
+    log_line(title)
+    log_line("-" * 78)
+    log_line(body)
+    log_line("")
+
+
 def _log_call(
     argv: list[str],
     system: str,
@@ -529,6 +555,7 @@ def chat(
     messages: list[dict[str, str]],
     *,
     tier: str = "cheap",
+    model: str = "",
     remaining_s: float = 0.0,
     json_mode: bool = False,
     json_schema: Optional[dict[str, Any]] = None,
@@ -550,6 +577,9 @@ def chat(
 
     effort = effort_for(tier, remaining_s)
     chain = model_chain(tier)
+    if model:
+        # An explicit model leads the chain; the rest stays as the fallback.
+        chain = [model] + [m for m in chain if m != model]
     schema = json_schema
     resume = resume_session if config.REUSE_SESSION and resumable_session(resume_session) else ""
     keep = bool(resumable or resume) and config.REUSE_SESSION
@@ -612,6 +642,10 @@ def chat(
                 resume = ""  # stale session id; retry as a fresh conversation
                 attempts += 1
                 continue
+            if error.startswith("timeout"):
+                # A second run of the same model will time out too, and the
+                # retry eats the window the next model needs. Move down.
+                break
             time.sleep(1.0)
 
     return _local_reply(tier, fallback_text, "; ".join(errors[-3:]) or "all models failed")

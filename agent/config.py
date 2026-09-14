@@ -145,6 +145,10 @@ CHEAP_MODEL = setting("CLAUDE_CHEAP_MODEL", "claude-haiku-4-5-20251001")
 NORMAL_MODEL = setting("CLAUDE_NORMAL_MODEL", "claude-opus-5")
 # Hard problems and escalated repairs.
 STRONG_MODEL = setting("CLAUDE_STRONG_MODEL", "claude-opus-5")
+# Repair may escalate past Opus. Set to claude-fable-5-1 for the most capable
+# model; it costs about twice Opus per token and thinks for longer.
+REPAIR_MODEL = setting("CLAUDE_REPAIR_MODEL", STRONG_MODEL)
+
 # The emergency rung. Every stage runs Opus, but a chain of one model means a
 # timeout goes straight to the local skeleton - which is how problem_04 ended
 # up with a NotImplementedError stub. Keep one cheaper, faster model behind it.
@@ -163,7 +167,7 @@ CLI_ATTEMPTS = _int("CLAUDE_CLI_ATTEMPTS", "2")
 # Fraction of the remaining budget one attempt may spend while another model is
 # still available. Without it the first model consumes the whole pool on a
 # timeout and the fallback never gets a usable window.
-CLI_FIRST_ATTEMPT_SHARE = _float("CLAUDE_CLI_FIRST_ATTEMPT_SHARE", "0.6")
+CLI_FIRST_ATTEMPT_SHARE = _float("CLAUDE_CLI_FIRST_ATTEMPT_SHARE", "0.7")
 # Ignore CLAUDE.md, skills, plugins, hooks and MCP servers so a developer's
 # local Claude Code setup cannot change what this agent generates.
 CLI_SAFE_MODE = _flag("CLAUDE_CLI_SAFE_MODE", True)
@@ -193,6 +197,14 @@ PROMPT_LOG = setting("CLAUDE_PROMPT_LOG", "hone.log")
 # Re-tuned for CLI latency: a `claude -p` turn costs process start-up plus
 # thinking time, so the thresholds that used to fit a fast HTTP call now have
 # to cover a whole CLI round trip.
+# The plan is optional, so a slow one must not eat the deadline that
+# generation and repair need. Bounds the plan call only.
+PLAN_MAX_S = _float("CLAUDE_PLAN_MAX_S", "75")
+
+# Test-case generation is optional: only spend a round trip on it while there
+# is still room to generate and repair afterwards.
+TESTGEN_MIN_S = _float("CLAUDE_TESTGEN_MIN_S", "90")
+
 RESERVE_S = 20.0
 LATE_PHASE_S = 70.0
 MIN_REPAIR_S = 60.0

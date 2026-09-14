@@ -12,7 +12,7 @@ from typing import Any, Optional
 from . import config
 from .generator import python_skeleton
 from .graph import compiled_graph
-from .models import USAGE, reset_usage
+from .models import USAGE, log_line, reset_usage
 from .tools import ToolContext
 
 
@@ -51,6 +51,10 @@ class Orchestrator:
         reset_usage()
         path = Path(problem_path)
         target = Path(out_dir or config.SOLUTIONS_DIR)
+        log_line("")
+        log_line("#" * 78)
+        log_line(f"# RUN {path.name}")
+        log_line("#" * 78)
         state: dict[str, Any] = {}
         try:
             # JSON is UTF-8 by spec; utf-8-sig also tolerates an editor's BOM.

@@ -13,7 +13,7 @@ from langgraph.graph import END, StateGraph
 from . import config
 from .analyzer import Analysis
 from .generator import generate_python, generate_rust, python_skeleton
-from .models import USAGE
+from .models import USAGE, log_block, log_line
 from .planner import heuristic_plan, plan_solution
 from .repair import repair_solution
 from .tools import (
@@ -79,11 +79,12 @@ def _emit(state: AgentState, stage: str, detail: str, **extra: Any) -> dict[str,
     if ctx is not None:
         # Also on the context, so a salvaged run can still report its history.
         ctx.events.append(event)
-    print(
+    line = (
         f"[{event['elapsed_s']:7.2f}s | rem {event['remaining_s']:7.2f}s] "
-        f"{stage}: {detail}",
-        flush=True,
+        f"{stage}: {detail}"
     )
+    print(line, flush=True)
+    log_line(line)
     return event
 
 
@@ -218,6 +219,11 @@ def node_tests(state: AgentState) -> dict[str, Any]:
     events = [
         _emit(state, "tests", tests_tool.summary, used=tests_tool.used, node="tests")
     ]
+    log_block(
+        f"TEST CASES ({len(ctx.tests)}) - spec cases are authoritative, "
+        "model-written ones are soft",
+        json.dumps(ctx.tests, indent=2, default=str),
+    )
     return {"tests": ctx.tests, "events": events}
 
 
@@ -258,6 +264,21 @@ def node_verify(state: AgentState) -> dict[str, Any]:
     events = [
         _emit(state, "verify", report.summary, used=run.used, ok=report.ok, node="verify")
     ]
+    log_block(
+        f"VERIFY - {report.summary}",
+        json.dumps(
+            {
+                "ok": report.ok,
+                "syntax_ok": report.syntax_ok,
+                "entrypoint_ok": report.entrypoint_ok,
+                "stub": report.stub,
+                "cases": report.cases,
+                "hints": report.hints,
+            },
+            indent=2,
+            default=str,
+        ),
+    )
     best_report = state.get("best_report") or report
     if _report_score(report) >= _report_score(best_report):
         best_code = ctx.code

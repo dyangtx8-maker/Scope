@@ -74,7 +74,8 @@ Whichever you choose, please explain:
 
 Phase 2 keeps the same pipeline and adds correctness pressure:
 
-* spec-derived expected tests, built locally with no model call
+* spec-derived expected tests built locally, plus model-written cases whose
+  mismatches are soft and can never fail a spec-correct solution
 * stub / echo-solution rejection
 * cheap → normal → strong model routing
 * a real local benchmark when tests pass
@@ -113,10 +114,11 @@ this repo.
 | Job | Tier | Model |
 |---|---|---|
 | Plan (optional - see `CLAUDE_PLAN_LLM`) | cheap | `claude-haiku-4-5-20251001`, effort low |
-| Python / Rust generation, repair | normal | `claude-opus-5` |
-| Hard problems, escalated repair | strong | `claude-opus-5` |
+| Test cases and code, written in parallel | normal | `claude-opus-5` |
+| Hard problems | strong | `claude-opus-5` |
+| Repair | — | `CLAUDE_REPAIR_MODEL`, Opus by default, `claude-fable-5-1` supported |
 | Emergency rung when a call times out | fallback | `claude-sonnet-5` |
-| Analyze, test cases, verify, benchmark, write | — | local, no model |
+| Analyze, verify, benchmark, write | — | local, no model |
 | Trap extraction, spec tests, stub check, benchmark, disk write | — | local, no model |
 
 The CLI, not this code, owns authentication, overload fallback
@@ -135,8 +137,8 @@ python3 tests/test_architecture.py         # no network, no CLI needed
 python3 solve.py problems/problem_01.json
 ```
 
-Every model call - argv, system prompt, user prompt, reply - is appended to
-`hone.log` by default (`CLAUDE_PROMPT_LOG`, or `--log-prompts PATH`).
+Every stage line and every model call - argv, system prompt, user prompt,
+reply - is appended to `hone.log` by default (`CLAUDE_PROMPT_LOG`, or `--log-prompts PATH`).
 
 `solve.py --log-prompts PATH` appends every model call - the argv, the system
 prompt, the user prompt and the reply - to PATH, so a run records exactly what

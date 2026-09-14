@@ -114,17 +114,19 @@ class GenerateTestsTool(Tool):
     def should_use(self, ctx: ToolContext) -> tuple[bool, str]:
         if ctx.analysis is None:
             return False, "no analysis"
-        return True, "spec cases derived from the statement, no model call"
+        return True, "spec cases, plus model-written cases when time allows"
 
     def run(self, ctx: ToolContext) -> ToolResult:
-        from .verifier import build_tests
+        from .verifier import build_tests, propose_model_tests
 
         ctx.tests = build_tests(ctx.analysis, ctx.problem)
+        extra = propose_model_tests(ctx.analysis, ctx.plan, ctx.remaining_s)
+        ctx.tests.extend(extra)
         return ToolResult(
             name=self.name,
             used=True,
             ok=True,
-            summary=f"prepared {len(ctx.tests)} local tests",
+            summary=f"prepared {len(ctx.tests)} tests ({len(extra)} model-written)",
             data={"count": len(ctx.tests), "names": [t.get("name") for t in ctx.tests]},
         )
 

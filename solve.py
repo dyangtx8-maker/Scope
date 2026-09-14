@@ -66,11 +66,12 @@ def _outcome(path: Path, meta: dict | None, error: str) -> str:
             flush=True,
         )
         return "salvaged"
-    print(
+    line = (
         f"done verified={meta['verified']} elapsed={meta.get('elapsed_s')}s "
-        f"-> {meta.get('solution')}",
-        flush=True,
+        f"-> {meta.get('solution')}"
     )
+    print(line, flush=True)
+    models.log_line(line)
     return "ok" if meta.get("verified") else "unverified"
 
 

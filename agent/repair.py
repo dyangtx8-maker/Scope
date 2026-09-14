@@ -56,6 +56,7 @@ def repair_solution(
             },
         ],
         tier=tier,
+        model=config.REPAIR_MODEL,
         remaining_s=remaining_s,
         resume_session=session_id,
         resumable=True,

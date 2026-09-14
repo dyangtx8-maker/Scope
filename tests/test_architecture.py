@@ -141,12 +141,13 @@ class ArchitectureTests(unittest.TestCase):
         self.assertNotIn("budget_usd", inspect.signature(chat).parameters)
         self.assertNotIn("budget_usd", inspect.signature(build_argv).parameters)
 
-    def test_test_cases_are_built_without_a_model(self) -> None:
-        """The tests stage is local: spec cases only, no adversarial call."""
-        self.assertFalse(hasattr(verifier, "propose_adversarial_tests"))
+    def test_spec_cases_need_no_model_but_extra_cases_use_opus(self) -> None:
+        """Spec cases are always local; model-written cases run on Opus."""
         problem = json.loads(SAMPLE.read_text())
         analysis = analyze_problem(problem)
-        ctx = ToolContext(remaining_s=300.0)
+
+        # No plan and no clock -> purely local, no CLI call at all.
+        ctx = ToolContext(remaining_s=10.0)
         ctx.analysis, ctx.problem = analysis, problem
         real_invoke = models._invoke
         models._invoke = lambda *a, **k: self.fail("the tests stage called the CLI")
@@ -157,6 +158,51 @@ class ArchitectureTests(unittest.TestCase):
         self.assertTrue(result.used)
         self.assertGreaterEqual(len(ctx.tests), 3)
         self.assertEqual({t["kind"] for t in ctx.tests} - {"spec", "static_trap", "public"}, set())
+
+        # With a plan and time on the clock it routes to the codegen model.
+        self.assertEqual(models.choose_tier("tests", "hard", 300), "normal")
+        self.assertIn("opus", models.model_for("normal"))
+
+    def test_model_written_cases_cannot_fail_a_spec_correct_solution(self) -> None:
+        """Their expected values are guesses, so a mismatch stays soft."""
+        problem = json.loads(SAMPLE.read_text())
+        analysis = analyze_problem(problem)
+        good = (
+            "def simulate_writes(lengths, outcomes, max_retries, level_cap,\n"
+            "                    spin_limit, initial_credits, credit_cap):\n"
+            "    return {'packets': [], 'telemetry': {\n"
+            "        'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0,\n"
+            "        'attempts': 0, 'spins': 0, 'yields': 0,\n"
+            "        'final_level': 0, 'final_credits': 0}}\n"
+        )
+        spec_only = [c for c in spec_cases(analysis) if c["name"] == "spec_empty"]
+        wrong = dict(spec_only[0], name="model_bogus", kind="model",
+                     expected={"packets": ["nonsense"], "telemetry": {}})
+        report = verify(good, analysis, spec_only + [wrong])
+        self.assertTrue(report.ok, report.summary)
+        self.assertIn("model-written mismatches only", report.summary)
+
+    def test_repair_model_is_configurable_and_leads_the_chain(self) -> None:
+        """`CLAUDE_REPAIR_MODEL` picks Opus or Fable for the repair stage."""
+        self.assertEqual(config.REPAIR_MODEL, config.STRONG_MODEL)
+        seen = []
+        real_invoke = models._invoke
+        models._invoke = lambda argv, prompt, timeout: (
+            seen.append(argv[argv.index("--model") + 1]), (None, "stop"))[1]
+        real_available = models.cli_available
+        models.cli_available = lambda *a, **k: True
+        real_attempts = config.CLI_ATTEMPTS
+        config.CLI_ATTEMPTS = 1
+        try:
+            chat([{"role": "user", "content": "x"}], tier="strong",
+                 model="claude-fable-5-1", timeout_s=120.0, fallback_text="local")
+        finally:
+            models._invoke = real_invoke
+            models.cli_available = real_available
+            config.CLI_ATTEMPTS = real_attempts
+            reset_usage()
+        self.assertEqual(seen[0], "claude-fable-5-1")
+        self.assertIn("opus", seen[1])  # Opus remains the rung below it
 
     def test_every_chain_keeps_a_rung_below_the_primary(self) -> None:
         """A one-model chain sends a timeout straight to the local skeleton."""
@@ -186,6 +232,8 @@ class ArchitectureTests(unittest.TestCase):
             config.CLI_ATTEMPTS = real_attempts
             reset_usage()
         self.assertGreaterEqual(len(windows), 2, windows)
+        # a timeout moves to the next model rather than retrying the same one
+        self.assertEqual(len(windows), len(models.model_chain("strong")), windows)
         # the first model gets a share, never the lot
         self.assertLess(windows[0], 200.0)
         self.assertAlmostEqual(windows[0], 200.0 * config.CLI_FIRST_ATTEMPT_SHARE, delta=1.0)
@@ -449,6 +497,24 @@ class ArchitectureTests(unittest.TestCase):
             self.assertEqual(outcome(Path("p"), {"salvaged": True}, ""), "salvaged")
             self.assertEqual(outcome(Path("p"), {"verified": True}, ""), "ok")
             self.assertEqual(outcome(Path("p"), {"verified": False}, ""), "unverified")
+
+    def test_plan_can_never_eat_the_whole_deadline(self) -> None:
+        """A slow plan must leave generation and repair a budget."""
+        windows = []
+        real_invoke = models._invoke
+        models._invoke = lambda argv, prompt, t: (windows.append(t), (None, "timeout"))[1]
+        real_available = models.cli_available
+        models.cli_available = lambda *a, **k: True
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                plan_solution(analyze_problem(json.loads(SAMPLE.read_text())), 300.0)
+        finally:
+            models._invoke = real_invoke
+            models.cli_available = real_available
+            reset_usage()
+        self.assertTrue(windows)
+        self.assertLessEqual(max(windows), config.PLAN_MAX_S)
+        self.assertLess(sum(windows), 300.0 - config.RESERVE_S)
 
     def test_plan_llm_defaults_on_and_is_a_real_setting(self) -> None:
         # Setting config.PLAN_LLM inside a test creates the attribute, so the

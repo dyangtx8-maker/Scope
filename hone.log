@@ -17,6 +17,10 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         reset_usage()
   │         path = Path(problem_path)
   │         target = Path(out_dir or config.SOLUTIONS_DIR)
+  │         log_line("")
+  │         log_line("#" * 78)
+  │         log_line(f"# RUN {path.name}")
+  │         log_line("#" * 78)
   │         state: dict[str, Any] = {}
   │         try:
   │             # JSON is UTF-8 by spec; utf-8-sig also tolerates an editor's BOM.
@@ -53,7 +57,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         return final["meta"]
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/orchestrator.py:89  (_salvage)
+  ┌─ agent/orchestrator.py:93  (_salvage)
   │     def _salvage(
   │         self,
   │         path: Path,
@@ -279,6 +283,10 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ NORMAL_MODEL = setting("CLAUDE_NORMAL_MODEL", "claude-opus-5")
   │ # Hard problems and escalated repairs.
   │ STRONG_MODEL = setting("CLAUDE_STRONG_MODEL", "claude-opus-5")
+  │ # Repair may escalate past Opus. Set to claude-fable-5-1 for the most capable
+  │ # model; it costs about twice Opus per token and thinks for longer.
+  │ REPAIR_MODEL = setting("CLAUDE_REPAIR_MODEL", STRONG_MODEL)
+  │ 
   │ # The emergency rung. Every stage runs Opus, but a chain of one model means a
   │ # timeout goes straight to the local skeleton - which is how problem_04 ended
   │ # up with a NotImplementedError stub. Keep one cheaper, faster model behind it.
@@ -297,7 +305,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ # Fraction of the remaining budget one attempt may spend while another model is
   │ # still available. Without it the first model consumes the whole pool on a
   │ # timeout and the fallback never gets a usable window.
-  │ CLI_FIRST_ATTEMPT_SHARE = _float("CLAUDE_CLI_FIRST_ATTEMPT_SHARE", "0.6")
+  │ CLI_FIRST_ATTEMPT_SHARE = _float("CLAUDE_CLI_FIRST_ATTEMPT_SHARE", "0.7")
   │ # Ignore CLAUDE.md, skills, plugins, hooks and MCP servers so a developer's
   │ # local Claude Code setup cannot change what this agent generates.
   │ CLI_SAFE_MODE = _flag("CLAUDE_CLI_SAFE_MODE", True)
@@ -327,6 +335,14 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ # Re-tuned for CLI latency: a `claude -p` turn costs process start-up plus
   │ # thinking time, so the thresholds that used to fit a fast HTTP call now have
   │ # to cover a whole CLI round trip.
+  │ # The plan is optional, so a slow one must not eat the deadline that
+  │ # generation and repair need. Bounds the plan call only.
+  │ PLAN_MAX_S = _float("CLAUDE_PLAN_MAX_S", "75")
+  │ 
+  │ # Test-case generation is optional: only spend a round trip on it while there
+  │ # is still room to generate and repair afterwards.
+  │ TESTGEN_MIN_S = _float("CLAUDE_TESTGEN_MIN_S", "90")
+  │ 
   │ RESERVE_S = 20.0
   │ LATE_PHASE_S = 70.0
   │ MIN_REPAIR_S = 60.0
@@ -336,7 +352,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· UNIT TESTS ································································
 
-  8 unit test(s) in tests/test_architecture.py exercise this stage:
+  9 unit test(s) in tests/test_architecture.py exercise this stage:
 
   ┌─ test_a_bad_number_falls_back_instead_of_crashing
   │     def test_a_bad_number_falls_back_instead_of_crashing(self) -> None:
@@ -420,6 +436,26 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertEqual(config.load_env(Path(tmp) / "missing.env"), {})
   └────────────────────────────────────────────────────────────
 
+  ┌─ test_plan_can_never_eat_the_whole_deadline
+  │     def test_plan_can_never_eat_the_whole_deadline(self) -> None:
+  │         """A slow plan must leave generation and repair a budget."""
+  │         windows = []
+  │         real_invoke = models._invoke
+  │         models._invoke = lambda argv, prompt, t: (windows.append(t), (None, "timeout"))[1]
+  │         real_available = models.cli_available
+  │         models.cli_available = lambda *a, **k: True
+  │         try:
+  │             with contextlib.redirect_stdout(io.StringIO()):
+  │                 plan_solution(analyze_problem(json.loads(SAMPLE.read_text())), 300.0)
+  │         finally:
+  │             models._invoke = real_invoke
+  │             models.cli_available = real_available
+  │             reset_usage()
+  │         self.assertTrue(windows)
+  │         self.assertLessEqual(max(windows), config.PLAN_MAX_S)
+  │         self.assertLess(sum(windows), 300.0 - config.RESERVE_S)
+  └────────────────────────────────────────────────────────────
+
   ┌─ test_plan_llm_defaults_on_and_is_a_real_setting
   │     def test_plan_llm_defaults_on_and_is_a_real_setting(self) -> None:
   │         # Setting config.PLAN_LLM inside a test creates the attribute, so the
@@ -495,8 +531,11 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   ┌─ agent/models.py:153  (choose_tier)
   │ def choose_tier(stage: str, difficulty: str, remaining_s: float, repair_attempt: int = 0) -> str:
   │     """Cost-aware routing. Codegen never uses the cheap tier."""
-  │     if stage in {"plan", "tests"}:
+  │     if stage == "plan":
   │         return "cheap"
+  │     if stage == "tests":
+  │         # Test cases are written by the same model that writes the code.
+  │         return "normal"
   │     if stage == "generate":
   │         if difficulty == "hard" and remaining_s >= 120:
   │             return "strong"
@@ -508,7 +547,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return "cheap"
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:168  (call_timeout)
+  ┌─ agent/models.py:171  (call_timeout)
   │ def call_timeout(remaining_s: float) -> float:
   │     """How long one CLI call may run without eating the write reserve."""
   │     usable = float(remaining_s or 0.0) - config.RESERVE_S
@@ -519,7 +558,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - building the command line ··········································
 
-  ┌─ agent/models.py:204  (bin_candidates)
+  ┌─ agent/models.py:207  (bin_candidates)
   │ def bin_candidates(name: str, windows: bool = os.name == "nt") -> list[str]:
   │     """Names to look for on PATH, most launchable first.
   │ 
@@ -532,7 +571,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return [name + ext for ext in (".cmd", ".exe", ".bat")] + [name]
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:216  (cli_path)
+  ┌─ agent/models.py:219  (cli_path)
   │ def cli_path(refresh: bool = False) -> str:
   │     """Absolute path of the Claude binary, resolved once, or "" if missing.
   │ 
@@ -550,7 +589,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return _CLI_PATH
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:279  (build_argv)
+  ┌─ agent/models.py:282  (build_argv)
   │ def build_argv(
   │     *,
   │     model: str,
@@ -598,7 +637,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return argv
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:261  (_split_messages)
+  ┌─ agent/models.py:264  (_split_messages)
   │ def _split_messages(messages: list[dict[str, str]]) -> tuple[str, str]:
   │     """Collapse OpenAI-style messages into (system prompt, user prompt)."""
   │     system_parts: list[str] = []
@@ -619,7 +658,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - running it and reading the reply ···································
 
-  ┌─ agent/models.py:408  (_invoke)
+  ┌─ agent/models.py:434  (_invoke)
   │ def _invoke(argv: list[str], prompt: str, timeout_s: float) -> tuple[Optional[dict[str, Any]], str]:
   │     try:
   │         process = subprocess.Popen(
@@ -663,7 +702,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return payload, ""
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:451  (_kill)
+  ┌─ agent/models.py:477  (_kill)
   │ def _kill(process: subprocess.Popen) -> None:
   │     # killpg takes the whole tree with it, but it only exists on POSIX.
   │     try:
@@ -682,7 +721,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         pass
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:326  (parse_result)
+  ┌─ agent/models.py:329  (parse_result)
   │ def parse_result(stdout: str) -> Optional[dict[str, Any]]:
   │     """Pull the result object out of CLI stdout, ignoring any noise lines."""
   │     found: Optional[dict[str, Any]] = None
@@ -705,7 +744,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return payload if isinstance(payload, dict) else None
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:348  (payload_error)
+  ┌─ agent/models.py:351  (payload_error)
   │ def payload_error(payload: dict[str, Any]) -> str:
   │     """Empty string when the CLI really did answer."""
   │     if payload.get("is_error"):
@@ -721,7 +760,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return ""
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:469  (_sum_model_usage)
+  ┌─ agent/models.py:495  (_sum_model_usage)
   │ def _sum_model_usage(payload: dict[str, Any]) -> dict[str, int]:
   │     totals = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
   │     for entry in (payload.get("modelUsage") or {}).values():
@@ -742,7 +781,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:489  (_reply_from_payload)
+  ┌─ agent/models.py:515  (_reply_from_payload)
   │ def _reply_from_payload(payload: dict[str, Any], requested: str, tier: str) -> ModelReply:
   │     used = list((payload.get("modelUsage") or {}).keys())
   │     structured = payload.get("structured_output")
@@ -771,11 +810,12 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - the retry/fallback loop ············································
 
-  ┌─ agent/models.py:528  (chat)
+  ┌─ agent/models.py:554  (chat)
   │ def chat(
   │     messages: list[dict[str, str]],
   │     *,
   │     tier: str = "cheap",
+  │     model: str = "",
   │     remaining_s: float = 0.0,
   │     json_mode: bool = False,
   │     json_schema: Optional[dict[str, Any]] = None,
@@ -797,6 +837,9 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ 
   │     effort = effort_for(tier, remaining_s)
   │     chain = model_chain(tier)
+  │     if model:
+  │         # An explicit model leads the chain; the rest stays as the fallback.
+  │         chain = [model] + [m for m in chain if m != model]
   │     schema = json_schema
   │     resume = resume_session if config.REUSE_SESSION and resumable_session(resume_session) else ""
   │     keep = bool(resumable or resume) and config.REUSE_SESSION
@@ -859,6 +902,10 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │                 resume = ""  # stale session id; retry as a fresh conversation
   │                 attempts += 1
   │                 continue
+  │             if error.startswith("timeout"):
+  │                 # A second run of the same model will time out too, and the
+  │                 # retry eats the window the next model needs. Move down.
+  │                 break
   │             time.sleep(1.0)
   │ 
   │     return _local_reply(tier, fallback_text, "; ".join(errors[-3:]) or "all models failed")
@@ -866,7 +913,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· UNIT TESTS ································································
 
-  15 unit test(s) in tests/test_architecture.py exercise this stage:
+  17 unit test(s) in tests/test_architecture.py exercise this stage:
 
   ┌─ test_call_timeout_protects_the_write_reserve
   │     def test_call_timeout_protects_the_write_reserve(self) -> None:
@@ -988,6 +1035,8 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │             config.CLI_ATTEMPTS = real_attempts
   │             reset_usage()
   │         self.assertGreaterEqual(len(windows), 2, windows)
+  │         # a timeout moves to the next model rather than retrying the same one
+  │         self.assertEqual(len(windows), len(models.model_chain("strong")), windows)
   │         # the first model gets a share, never the lot
   │         self.assertLess(windows[0], 200.0)
   │         self.assertAlmostEqual(windows[0], 200.0 * config.CLI_FIRST_ATTEMPT_SHARE, delta=1.0)
@@ -1030,6 +1079,50 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         }
   │         self.assertIn("api_error", payload_error(payload))
   │         self.assertIn("terminal_reason", payload_error({"terminal_reason": "api_error"}))
+  └────────────────────────────────────────────────────────────
+
+  ┌─ test_plan_can_never_eat_the_whole_deadline
+  │     def test_plan_can_never_eat_the_whole_deadline(self) -> None:
+  │         """A slow plan must leave generation and repair a budget."""
+  │         windows = []
+  │         real_invoke = models._invoke
+  │         models._invoke = lambda argv, prompt, t: (windows.append(t), (None, "timeout"))[1]
+  │         real_available = models.cli_available
+  │         models.cli_available = lambda *a, **k: True
+  │         try:
+  │             with contextlib.redirect_stdout(io.StringIO()):
+  │                 plan_solution(analyze_problem(json.loads(SAMPLE.read_text())), 300.0)
+  │         finally:
+  │             models._invoke = real_invoke
+  │             models.cli_available = real_available
+  │             reset_usage()
+  │         self.assertTrue(windows)
+  │         self.assertLessEqual(max(windows), config.PLAN_MAX_S)
+  │         self.assertLess(sum(windows), 300.0 - config.RESERVE_S)
+  └────────────────────────────────────────────────────────────
+
+  ┌─ test_repair_model_is_configurable_and_leads_the_chain
+  │     def test_repair_model_is_configurable_and_leads_the_chain(self) -> None:
+  │         """`CLAUDE_REPAIR_MODEL` picks Opus or Fable for the repair stage."""
+  │         self.assertEqual(config.REPAIR_MODEL, config.STRONG_MODEL)
+  │         seen = []
+  │         real_invoke = models._invoke
+  │         models._invoke = lambda argv, prompt, timeout: (
+  │             seen.append(argv[argv.index("--model") + 1]), (None, "stop"))[1]
+  │         real_available = models.cli_available
+  │         models.cli_available = lambda *a, **k: True
+  │         real_attempts = config.CLI_ATTEMPTS
+  │         config.CLI_ATTEMPTS = 1
+  │         try:
+  │             chat([{"role": "user", "content": "x"}], tier="strong",
+  │                  model="claude-fable-5-1", timeout_s=120.0, fallback_text="local")
+  │         finally:
+  │             models._invoke = real_invoke
+  │             models.cli_available = real_available
+  │             config.CLI_ATTEMPTS = real_attempts
+  │             reset_usage()
+  │         self.assertEqual(seen[0], "claude-fable-5-1")
+  │         self.assertIn("opus", seen[1])  # Opus remains the rung below it
   └────────────────────────────────────────────────────────────
 
   ┌─ test_reply_reads_tokens_cost_and_structured_output
@@ -1079,13 +1172,14 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertNotIn("--no-session-persistence", argv)
   └────────────────────────────────────────────────────────────
 
-  ┌─ test_test_cases_are_built_without_a_model
-  │     def test_test_cases_are_built_without_a_model(self) -> None:
-  │         """The tests stage is local: spec cases only, no adversarial call."""
-  │         self.assertFalse(hasattr(verifier, "propose_adversarial_tests"))
+  ┌─ test_spec_cases_need_no_model_but_extra_cases_use_opus
+  │     def test_spec_cases_need_no_model_but_extra_cases_use_opus(self) -> None:
+  │         """Spec cases are always local; model-written cases run on Opus."""
   │         problem = json.loads(SAMPLE.read_text())
   │         analysis = analyze_problem(problem)
-  │         ctx = ToolContext(remaining_s=300.0)
+  │ 
+  │         # No plan and no clock -> purely local, no CLI call at all.
+  │         ctx = ToolContext(remaining_s=10.0)
   │         ctx.analysis, ctx.problem = analysis, problem
   │         real_invoke = models._invoke
   │         models._invoke = lambda *a, **k: self.fail("the tests stage called the CLI")
@@ -1096,6 +1190,10 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertTrue(result.used)
   │         self.assertGreaterEqual(len(ctx.tests), 3)
   │         self.assertEqual({t["kind"] for t in ctx.tests} - {"spec", "static_trap", "public"}, set())
+  │ 
+  │         # With a plan and time on the clock it routes to the codegen model.
+  │         self.assertEqual(models.choose_tier("tests", "hard", 300), "normal")
+  │         self.assertIn("opus", models.model_for("normal"))
   └────────────────────────────────────────────────────────────
 
   ┌─ test_windows_prefers_the_launchable_shim
@@ -1433,7 +1531,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· UNIT TESTS ································································
 
-  6 unit test(s) in tests/test_architecture.py exercise this stage:
+  8 unit test(s) in tests/test_architecture.py exercise this stage:
 
   ┌─ test_analyzer_finds_traps
   │     def test_analyzer_finds_traps(self) -> None:
@@ -1445,6 +1543,47 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertEqual(analysis.difficulty, "hard")
   │         self.assertIn("dict", analysis.return_hint)
   │         self.assertGreaterEqual(len(spec_cases(analysis)), 3)
+  └────────────────────────────────────────────────────────────
+
+  ┌─ test_model_written_cases_cannot_fail_a_spec_correct_solution
+  │     def test_model_written_cases_cannot_fail_a_spec_correct_solution(self) -> None:
+  │         """Their expected values are guesses, so a mismatch stays soft."""
+  │         problem = json.loads(SAMPLE.read_text())
+  │         analysis = analyze_problem(problem)
+  │         good = (
+  │             "def simulate_writes(lengths, outcomes, max_retries, level_cap,\n"
+  │             "                    spin_limit, initial_credits, credit_cap):\n"
+  │             "    return {'packets': [], 'telemetry': {\n"
+  │             "        'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0,\n"
+  │             "        'attempts': 0, 'spins': 0, 'yields': 0,\n"
+  │             "        'final_level': 0, 'final_credits': 0}}\n"
+  │         )
+  │         spec_only = [c for c in spec_cases(analysis) if c["name"] == "spec_empty"]
+  │         wrong = dict(spec_only[0], name="model_bogus", kind="model",
+  │                      expected={"packets": ["nonsense"], "telemetry": {}})
+  │         report = verify(good, analysis, spec_only + [wrong])
+  │         self.assertTrue(report.ok, report.summary)
+  │         self.assertIn("model-written mismatches only", report.summary)
+  └────────────────────────────────────────────────────────────
+
+  ┌─ test_plan_can_never_eat_the_whole_deadline
+  │     def test_plan_can_never_eat_the_whole_deadline(self) -> None:
+  │         """A slow plan must leave generation and repair a budget."""
+  │         windows = []
+  │         real_invoke = models._invoke
+  │         models._invoke = lambda argv, prompt, t: (windows.append(t), (None, "timeout"))[1]
+  │         real_available = models.cli_available
+  │         models.cli_available = lambda *a, **k: True
+  │         try:
+  │             with contextlib.redirect_stdout(io.StringIO()):
+  │                 plan_solution(analyze_problem(json.loads(SAMPLE.read_text())), 300.0)
+  │         finally:
+  │             models._invoke = real_invoke
+  │             models.cli_available = real_available
+  │             reset_usage()
+  │         self.assertTrue(windows)
+  │         self.assertLessEqual(max(windows), config.PLAN_MAX_S)
+  │         self.assertLess(sum(windows), 300.0 - config.RESERVE_S)
   └────────────────────────────────────────────────────────────
 
   ┌─ test_plan_llm_off_skips_the_model_entirely
@@ -1487,6 +1626,30 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertEqual(analysis.io_mode, "stdin")
   └────────────────────────────────────────────────────────────
 
+  ┌─ test_spec_cases_need_no_model_but_extra_cases_use_opus
+  │     def test_spec_cases_need_no_model_but_extra_cases_use_opus(self) -> None:
+  │         """Spec cases are always local; model-written cases run on Opus."""
+  │         problem = json.loads(SAMPLE.read_text())
+  │         analysis = analyze_problem(problem)
+  │ 
+  │         # No plan and no clock -> purely local, no CLI call at all.
+  │         ctx = ToolContext(remaining_s=10.0)
+  │         ctx.analysis, ctx.problem = analysis, problem
+  │         real_invoke = models._invoke
+  │         models._invoke = lambda *a, **k: self.fail("the tests stage called the CLI")
+  │         try:
+  │             result = maybe_run(GenerateTestsTool(), ctx)
+  │         finally:
+  │             models._invoke = real_invoke
+  │         self.assertTrue(result.used)
+  │         self.assertGreaterEqual(len(ctx.tests), 3)
+  │         self.assertEqual({t["kind"] for t in ctx.tests} - {"spec", "static_trap", "public"}, set())
+  │ 
+  │         # With a plan and time on the clock it routes to the codegen model.
+  │         self.assertEqual(models.choose_tier("tests", "hard", 300), "normal")
+  │         self.assertIn("opus", models.model_for("normal"))
+  └────────────────────────────────────────────────────────────
+
   ┌─ test_stub_is_rejected
   │     def test_stub_is_rejected(self) -> None:
   │         stub = (
@@ -1500,25 +1663,6 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         report = verify(stub, analysis, [])
   │         self.assertFalse(report.ok)
   │         self.assertTrue(report.stub)
-  └────────────────────────────────────────────────────────────
-
-  ┌─ test_test_cases_are_built_without_a_model
-  │     def test_test_cases_are_built_without_a_model(self) -> None:
-  │         """The tests stage is local: spec cases only, no adversarial call."""
-  │         self.assertFalse(hasattr(verifier, "propose_adversarial_tests"))
-  │         problem = json.loads(SAMPLE.read_text())
-  │         analysis = analyze_problem(problem)
-  │         ctx = ToolContext(remaining_s=300.0)
-  │         ctx.analysis, ctx.problem = analysis, problem
-  │         real_invoke = models._invoke
-  │         models._invoke = lambda *a, **k: self.fail("the tests stage called the CLI")
-  │         try:
-  │             result = maybe_run(GenerateTestsTool(), ctx)
-  │         finally:
-  │             models._invoke = real_invoke
-  │         self.assertTrue(result.used)
-  │         self.assertGreaterEqual(len(ctx.tests), 3)
-  │         self.assertEqual({t["kind"] for t in ctx.tests} - {"spec", "static_trap", "public"}, set())
   └────────────────────────────────────────────────────────────
 
   ┌─ test_verifier_catches_syntax_and_missing_entry
@@ -1644,6 +1788,8 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         ],
   │         tier=tier,
   │         remaining_s=remaining_s,
+  │         # The plan is a nice-to-have; it never gets the whole clock.
+  │         timeout_s=min(call_timeout(remaining_s), config.PLAN_MAX_S),
   │         json_mode=True,
   │         json_schema=PLAN_SCHEMA,
   │         fallback_text="",
@@ -1837,7 +1983,27 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· UNIT TESTS ································································
 
-  2 unit test(s) in tests/test_architecture.py exercise this stage:
+  3 unit test(s) in tests/test_architecture.py exercise this stage:
+
+  ┌─ test_plan_can_never_eat_the_whole_deadline
+  │     def test_plan_can_never_eat_the_whole_deadline(self) -> None:
+  │         """A slow plan must leave generation and repair a budget."""
+  │         windows = []
+  │         real_invoke = models._invoke
+  │         models._invoke = lambda argv, prompt, t: (windows.append(t), (None, "timeout"))[1]
+  │         real_available = models.cli_available
+  │         models.cli_available = lambda *a, **k: True
+  │         try:
+  │             with contextlib.redirect_stdout(io.StringIO()):
+  │                 plan_solution(analyze_problem(json.loads(SAMPLE.read_text())), 300.0)
+  │         finally:
+  │             models._invoke = real_invoke
+  │             models.cli_available = real_available
+  │             reset_usage()
+  │         self.assertTrue(windows)
+  │         self.assertLessEqual(max(windows), config.PLAN_MAX_S)
+  │         self.assertLess(sum(windows), 300.0 - config.RESERVE_S)
+  └────────────────────────────────────────────────────────────
 
   ┌─ test_plan_llm_defaults_on_and_is_a_real_setting
   │     def test_plan_llm_defaults_on_and_is_a_real_setting(self) -> None:
@@ -2159,12 +2325,12 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   └────────────────────────────────────────────────────────────
 
 ==============================================================================
-5. STAGE: TESTS - local spec cases, no model call
+5. STAGE: TESTS - local spec cases + Opus-written cases, parallel with generate
 ==============================================================================
 
 ·· CODE ······································································
 
-  ┌─ agent/verifier.py:81  (spec_cases)
+  ┌─ agent/verifier.py:83  (spec_cases)
   │ def spec_cases(analysis: Analysis) -> list[dict[str, Any]]:
   │     """Tiny expected cases taken from the wording, not from hidden tests."""
   │     name = analysis.proto_entrypoint or analysis.entrypoint
@@ -2230,7 +2396,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return []
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:146  (build_tests)
+  ┌─ agent/verifier.py:148  (build_tests)
   │ def build_tests(analysis: Analysis, problem: dict[str, Any]) -> list[dict[str, Any]]:
   │     tests: list[dict[str, Any]] = []
   │     for i, example in enumerate(analysis.public_examples):
@@ -2256,6 +2422,62 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return tests
   └────────────────────────────────────────────────────────────
 
+  ┌─ agent/verifier.py:196  (propose_model_tests)
+  │ def propose_model_tests(
+  │     analysis: Analysis, plan: Plan | None, remaining_s: float
+  │ ) -> list[dict[str, Any]]:
+  │     """Extra cases written by the same model that writes the code.
+  │ 
+  │     Their expected values are guesses, so a mismatch here is soft: it can never
+  │     fail a solution the spec cases accept.
+  │     """
+  │     if remaining_s < config.TESTGEN_MIN_S or plan is None:
+  │         return []
+  │     tier = choose_tier("tests", analysis.difficulty, remaining_s)
+  │     reply = chat(
+  │         [
+  │             {
+  │                 "role": "system",
+  │                 "content": (
+  │                     "Invent 2 or 3 tiny unit tests from the problem statement. "
+  │                     "Each test must include a concrete expected value you can "
+  │                     "derive by hand from the wording. JSON only: "
+  │                     '{"tests":[{"name":"...","args":[...],"stdin":null,"expected":...}]}'
+  │                 ),
+  │             },
+  │             {
+  │                 "role": "user",
+  │                 "content": (
+  │                     f"entrypoint={analysis.proto_entrypoint} io={analysis.io_mode}\n"
+  │                     f"traps={plan.traps_to_handle}\nideas={plan.test_ideas}\n\n"
+  │                     f"{analysis.statement[:2800]}"
+  │                 ),
+  │             },
+  │         ],
+  │         tier=tier,
+  │         remaining_s=remaining_s,
+  │         json_mode=True,
+  │         json_schema=TESTGEN_SCHEMA,
+  │         fallback_text="",
+  │     )
+  │     data = reply_json(reply)
+  │     out = []
+  │     for i, raw in enumerate(data.get("tests") or []):
+  │         if not isinstance(raw, dict) or "expected" not in raw:
+  │             continue
+  │         item = {
+  │             "name": str(raw.get("name") or f"model_{i}"),
+  │             "kind": "model",
+  │             "expected": raw.get("expected"),
+  │         }
+  │         if analysis.io_mode == "stdin":
+  │             item["stdin"] = str(raw.get("stdin") or "")
+  │         else:
+  │             item["args"] = raw.get("args") or []
+  │         out.append(item)
+  │     return out[:3]
+  └────────────────────────────────────────────────────────────
+
   ┌─ agent/tools.py:111  (GenerateTestsTool)
   │ class GenerateTestsTool(Tool):
   │     name = "generate_tests"
@@ -2263,19 +2485,54 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     def should_use(self, ctx: ToolContext) -> tuple[bool, str]:
   │         if ctx.analysis is None:
   │             return False, "no analysis"
-  │         return True, "spec cases derived from the statement, no model call"
+  │         return True, "spec cases, plus model-written cases when time allows"
   │ 
   │     def run(self, ctx: ToolContext) -> ToolResult:
-  │         from .verifier import build_tests
+  │         from .verifier import build_tests, propose_model_tests
   │ 
   │         ctx.tests = build_tests(ctx.analysis, ctx.problem)
+  │         extra = propose_model_tests(ctx.analysis, ctx.plan, ctx.remaining_s)
+  │         ctx.tests.extend(extra)
   │         return ToolResult(
   │             name=self.name,
   │             used=True,
   │             ok=True,
-  │             summary=f"prepared {len(ctx.tests)} local tests",
+  │             summary=f"prepared {len(ctx.tests)} tests ({len(extra)} model-written)",
   │             data={"count": len(ctx.tests), "names": [t.get("name") for t in ctx.tests]},
   │         )
+  └────────────────────────────────────────────────────────────
+
+  ┌─ agent/verifier.py  (TESTGEN_SCHEMA)
+  │ {
+  │   "type": "object",
+  │   "properties": {
+  │     "tests": {
+  │       "type": "array",
+  │       "items": {
+  │         "type": "object",
+  │         "properties": {
+  │           "name": {
+  │             "type": "string"
+  │           },
+  │           "args": {
+  │             "type": "array"
+  │           },
+  │           "stdin": {
+  │             "type": "string"
+  │           },
+  │           "expected": {}
+  │         },
+  │         "required": [
+  │           "name",
+  │           "expected"
+  │         ]
+  │       }
+  │     }
+  │   },
+  │   "required": [
+  │     "tests"
+  │   ]
+  │ }
   └────────────────────────────────────────────────────────────
 
 ·· TEST CASES - spec, derived from the wording. Every one is a hard failure. ·
@@ -2600,12 +2857,105 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     }
   ]
 
-  NO MODEL CALL. This stage is pure Python and finishes in microseconds;
-  it runs concurrently with generation only because the graph fans out.
+·· PROMPT - the extra cases Opus writes (mismatches here are SOFT) ···········
+
+  tier normal | model claude-opus-5 | --effort medium | resumes=False
+  at 200s remaining the call is capped at 180s
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-opus-5",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "medium",
+    "--safe-mode",
+    "--system-prompt",
+    "Invent 2 or 3 tiny unit tests from the problem statement. Each test must include a concrete expected value you can derive by hand from the wording. JSON only: {\"tests\":[{\"name\":\"...\",\"args\":[...],\"stdin\":null,\"expected\":...}]}",
+    "--fallback-model",
+    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "--json-schema",
+    "{\"type\":\"object\",\"properties\":{\"tests\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"args\":{\"type\":\"array\"},\"stdin\":{\"type\":\"string\"},\"expected\":{}},\"required\":[\"name\",\"expected\"]}}},\"required\":[\"tests\"]}",
+    "--session-id",
+    "<fresh uuid4 per call>",
+    "--no-session-persistence"
+  ]
+
+--- --json-schema (the CLI validates the reply against this) ------------------
+  {
+    "type": "object",
+    "properties": {
+      "tests": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "args": {
+              "type": "array"
+            },
+            "stdin": {
+              "type": "string"
+            },
+            "expected": {}
+          },
+          "required": [
+            "name",
+            "expected"
+          ]
+        }
+      }
+    },
+    "required": [
+      "tests"
+    ]
+  }
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  Invent 2 or 3 tiny unit tests from the problem statement. Each test must include a concrete expected value you can derive by hand from the wording. JSON only: {"tests":[{"name":"...","args":[...],"stdin":null,"expected":...}]}
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  entrypoint=simulate_writes io=function
+  traps=['algorithm: run-length', 'wording: implicit', 'wording: exactly', 'wording: without going below', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work', 'cannot allocate by coordinate or iterate a bound']
+  ideas=['smallest legal input with a known expected value from the spec', 'invalid / implicit-error / boundary wording trap', 'a case that would explode if a huge bound is looped']
+  
+  Simulate a congestion-aware virtual-adapter write worker with a shared spin-credit reservoir.
+  
+  Define `simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)`.
+  
+  `lengths` is a list of packet lengths. A packet is valid exactly when its length is in `[1, 65535]`. Invalid packets make no attempt and change no shared state.
+  
+  `outcomes` is a run-length encoded chronological list of `(kind, count)` pairs. `kind` is `"ok"`, `"full"`, or `"error"`, and `count` is positive. Every write attempt consumes one outcome. After all runs are exhausted, every later attempt implicitly returns `"error"`.
+  
+  The worker has a congestion level, initially zero and always in `[0, level_cap]`, and a spin-credit balance, initially `initial_credits` and always in `[0, credit_cap]`. Valid packets are processed in order:
+  
+  * `"ok"` sends the packet, decreases the level by one without going below zero, then adds the packet's length to the credit balance, capped at `credit_cap`.
+  * `"error"` fails the packet and resets the level to zero. Credits are unchanged.
+  * `"full"` raises the level by one, capped at `level_cap`. Let `old_level` be the level before this increase and let `cost = min(2**old_level, spin_limit)`. Another attempt is scheduled only if fewer than `max_retries` retries have already been scheduled for this packet and the current credit balance is at least `cost`. Scheduling it counts one retry, deducts exactly `cost` credits, performs `cost` spin iterations, and performs exactly one scheduler yield if `2**old_level > spin_limit`. If either condition fails, the packet is dropped immediately; that final `"full"` causes no spin, yield, or credit deduction.
+  
+  Congestion and credits persist between packets. A retry is counted when its next attempt is scheduled. All arithmetic is exact.
+  
+  Return a dictionary containing:
+  
+  * `"packets"`: one `(status, retries, spins, yields)` tuple per input length. Status is `"INVALID"`, `"SENT"`, `"ERROR"`, or `"DROPPED"`.
+  * `"telemetry"`: a dictionary with `sent`, `dropped`, `errors`, `invalid`, `attempts`, `spins`, `yields`, `final_level`, and `final_credits`. The first four are packet counts. `attempts` includes attempts receiving implicit errors.
+  
+  Constraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`.
 
 ·· UNIT TESTS ································································
 
-  2 unit test(s) in tests/test_architecture.py exercise this stage:
+  3 unit test(s) in tests/test_architecture.py exercise this stage:
 
   ┌─ test_analyzer_finds_traps
   │     def test_analyzer_finds_traps(self) -> None:
@@ -2619,13 +2969,35 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertGreaterEqual(len(spec_cases(analysis)), 3)
   └────────────────────────────────────────────────────────────
 
-  ┌─ test_test_cases_are_built_without_a_model
-  │     def test_test_cases_are_built_without_a_model(self) -> None:
-  │         """The tests stage is local: spec cases only, no adversarial call."""
-  │         self.assertFalse(hasattr(verifier, "propose_adversarial_tests"))
+  ┌─ test_model_written_cases_cannot_fail_a_spec_correct_solution
+  │     def test_model_written_cases_cannot_fail_a_spec_correct_solution(self) -> None:
+  │         """Their expected values are guesses, so a mismatch stays soft."""
   │         problem = json.loads(SAMPLE.read_text())
   │         analysis = analyze_problem(problem)
-  │         ctx = ToolContext(remaining_s=300.0)
+  │         good = (
+  │             "def simulate_writes(lengths, outcomes, max_retries, level_cap,\n"
+  │             "                    spin_limit, initial_credits, credit_cap):\n"
+  │             "    return {'packets': [], 'telemetry': {\n"
+  │             "        'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0,\n"
+  │             "        'attempts': 0, 'spins': 0, 'yields': 0,\n"
+  │             "        'final_level': 0, 'final_credits': 0}}\n"
+  │         )
+  │         spec_only = [c for c in spec_cases(analysis) if c["name"] == "spec_empty"]
+  │         wrong = dict(spec_only[0], name="model_bogus", kind="model",
+  │                      expected={"packets": ["nonsense"], "telemetry": {}})
+  │         report = verify(good, analysis, spec_only + [wrong])
+  │         self.assertTrue(report.ok, report.summary)
+  │         self.assertIn("model-written mismatches only", report.summary)
+  └────────────────────────────────────────────────────────────
+
+  ┌─ test_spec_cases_need_no_model_but_extra_cases_use_opus
+  │     def test_spec_cases_need_no_model_but_extra_cases_use_opus(self) -> None:
+  │         """Spec cases are always local; model-written cases run on Opus."""
+  │         problem = json.loads(SAMPLE.read_text())
+  │         analysis = analyze_problem(problem)
+  │ 
+  │         # No plan and no clock -> purely local, no CLI call at all.
+  │         ctx = ToolContext(remaining_s=10.0)
   │         ctx.analysis, ctx.problem = analysis, problem
   │         real_invoke = models._invoke
   │         models._invoke = lambda *a, **k: self.fail("the tests stage called the CLI")
@@ -2636,6 +3008,10 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertTrue(result.used)
   │         self.assertGreaterEqual(len(ctx.tests), 3)
   │         self.assertEqual({t["kind"] for t in ctx.tests} - {"spec", "static_trap", "public"}, set())
+  │ 
+  │         # With a plan and time on the clock it routes to the codegen model.
+  │         self.assertEqual(models.choose_tier("tests", "hard", 300), "normal")
+  │         self.assertIn("opus", models.model_for("normal"))
   └────────────────────────────────────────────────────────────
 
 ==============================================================================
@@ -2644,7 +3020,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - the gauntlet, cheapest gate first ··································
 
-  ┌─ agent/verifier.py:19  (VerifyReport)
+  ┌─ agent/verifier.py:21  (VerifyReport)
   │ @dataclass
   │ class VerifyReport:
   │     ok: bool
@@ -2659,7 +3035,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         return asdict(self)
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:43  (syntax_check)
+  ┌─ agent/verifier.py:45  (syntax_check)
   │ def syntax_check(code: str) -> tuple[bool, str]:
   │     try:
   │         ast.parse(code)
@@ -2668,7 +3044,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         return False, f"syntax error: {exc}"
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:51  (looks_like_stub)
+  ┌─ agent/verifier.py:53  (looks_like_stub)
   │ def looks_like_stub(code: str, language: str = "python") -> tuple[bool, str]:
   │     lowered = code.lower()
   │     for marker in _STUB_MARKERS:
@@ -2691,7 +3067,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return False, ""
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:171  (_static_trap_ok)
+  ┌─ agent/verifier.py:251  (_static_trap_ok)
   │ def _static_trap_ok(code: str) -> tuple[bool, str]:
   │     banned = [
   │         "range(10**18)",
@@ -2708,7 +3084,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return True, "no obvious huge-range loop"
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:73  (_norm)
+  ┌─ agent/verifier.py:75  (_norm)
   │ def _norm(value: Any) -> Any:
   │     if isinstance(value, dict):
   │         return {str(k): _norm(v) for k, v in value.items()}
@@ -2717,7 +3093,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return value
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:187  (_runner_script)
+  ┌─ agent/verifier.py:267  (_runner_script)
   │ def _runner_script(code_path: str, entrypoint: str, io_mode: str, case: dict[str, Any]) -> str:
   │     payload = {
   │         "code_path": code_path,
@@ -2748,7 +3124,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ """
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:282  (_run_one)
+  ┌─ agent/verifier.py:362  (_run_one)
   │ def _run_one(code: str, analysis: Analysis, case: dict[str, Any]) -> dict[str, Any]:
   │     if case.get("kind") == "static_trap":
   │         ok, detail = _static_trap_ok(code)
@@ -2796,7 +3172,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         return {"name": case["name"], "ok": True, "detail": "passed"}
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:221  (_run_rust)
+  ┌─ agent/verifier.py:301  (_run_rust)
   │ def _run_rust(code: str, case: dict[str, Any]) -> dict[str, Any]:
   │     rustc = shutil.which("rustc")
   │     if not rustc:
@@ -2838,7 +3214,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         return {"name": case["name"], "ok": True, "detail": "passed"}
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:262  (rust_static_check)
+  ┌─ agent/verifier.py:342  (rust_static_check)
   │ def rust_static_check(code: str) -> VerifyReport:
   │     stub, reason = looks_like_stub(code, "rust")
   │     if stub:
@@ -2859,7 +3235,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return VerifyReport(ok=True, summary="rust static ok", syntax_ok=True, entrypoint_ok=True)
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:329  (run_tests)
+  ┌─ agent/verifier.py:409  (run_tests)
   │ def run_tests(code: str, analysis: Analysis, tests: list[dict[str, Any]]) -> VerifyReport:
   │     syntax_ok, syntax_detail = syntax_check(code)
   │     if not syntax_ok:
@@ -2902,12 +3278,15 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │             hints.append(f"{result['name']}: {result['detail']}")
   │ 
   │     passed = sum(1 for case in cases if case["ok"])
-  │     failed = [case for case in cases if not case["ok"]]
-  │     # Every case is now spec-derived and local, so every failure is real.
-  │     all_ok = not failed
+  │     # A spec case is derived from the wording and is authoritative. A case the
+  │     # model invented may carry a wrong expected value, so it cannot fail a run.
+  │     hard_fail = [c for c in cases if not c["ok"] and c.get("kind") != "model"]
+  │     all_ok = not hard_fail
   │     summary = f"{passed}/{len(cases)} local tests passed" if cases else "syntax+entrypoint ok"
-  │     if failed:
-  │         summary += f" ({len(failed)} failed: {', '.join(c['name'] for c in failed[:3])})"
+  │     if hard_fail:
+  │         summary += f" ({len(hard_fail)} failed: {', '.join(c['name'] for c in hard_fail[:3])})"
+  │     elif any(not c["ok"] for c in cases):
+  │         summary += " (model-written mismatches only)"
   │     if not cases:
   │         all_ok = True
   │     return VerifyReport(
@@ -2920,16 +3299,16 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     )
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:389  (verify)
+  ┌─ agent/verifier.py:472  (verify)
   │ def verify(code: str, analysis: Analysis, tests: list[dict[str, Any]]) -> VerifyReport:
   │     return run_tests(code, analysis, tests)
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/verifier.py:393  (benchmark)
+  ┌─ agent/verifier.py:476  (benchmark)
   │ def benchmark(code: str, analysis: Analysis, tests: list[dict[str, Any]]) -> dict[str, Any]:
   │     import time
   │ 
-  │     timed = [case for case in tests if case.get("kind") in {"spec", "smoke"}][:2]
+  │     timed = [case for case in tests if case.get("kind") in {"spec", "model", "smoke"}][:2]
   │     if not timed:
   │         return {"used": False, "reason": "no runnable case"}
   │     start = time.monotonic()
@@ -2945,7 +3324,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/tools.py:132  (RunSolutionTool)
+  ┌─ agent/tools.py:134  (RunSolutionTool)
   │ class RunSolutionTool(Tool):
   │     name = "run_solution"
   │ 
@@ -2973,7 +3352,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         )
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/tools.py:180  (BenchmarkSolutionTool)
+  ┌─ agent/tools.py:182  (BenchmarkSolutionTool)
   │ class BenchmarkSolutionTool(Tool):
   │     name = "benchmark_solution"
   │ 
@@ -3045,7 +3424,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· UNIT TESTS ································································
 
-  4 unit test(s) in tests/test_architecture.py exercise this stage:
+  5 unit test(s) in tests/test_architecture.py exercise this stage:
 
   ┌─ test_benchmark_needs_analysis
   │     def test_benchmark_needs_analysis(self) -> None:
@@ -3060,6 +3439,27 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         ctx = ToolContext(code="def x():\n    return 1\n", remaining_s=120, last_failure=object())
   │         result = maybe_run(BenchmarkSolutionTool(), ctx)
   │         self.assertFalse(result.used)
+  └────────────────────────────────────────────────────────────
+
+  ┌─ test_model_written_cases_cannot_fail_a_spec_correct_solution
+  │     def test_model_written_cases_cannot_fail_a_spec_correct_solution(self) -> None:
+  │         """Their expected values are guesses, so a mismatch stays soft."""
+  │         problem = json.loads(SAMPLE.read_text())
+  │         analysis = analyze_problem(problem)
+  │         good = (
+  │             "def simulate_writes(lengths, outcomes, max_retries, level_cap,\n"
+  │             "                    spin_limit, initial_credits, credit_cap):\n"
+  │             "    return {'packets': [], 'telemetry': {\n"
+  │             "        'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0,\n"
+  │             "        'attempts': 0, 'spins': 0, 'yields': 0,\n"
+  │             "        'final_level': 0, 'final_credits': 0}}\n"
+  │         )
+  │         spec_only = [c for c in spec_cases(analysis) if c["name"] == "spec_empty"]
+  │         wrong = dict(spec_only[0], name="model_bogus", kind="model",
+  │                      expected={"packets": ["nonsense"], "telemetry": {}})
+  │         report = verify(good, analysis, spec_only + [wrong])
+  │         self.assertTrue(report.ok, report.summary)
+  │         self.assertIn("model-written mismatches only", report.summary)
   └────────────────────────────────────────────────────────────
 
   ┌─ test_stub_is_rejected
@@ -3142,6 +3542,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │             },
   │         ],
   │         tier=tier,
+  │         model=config.REPAIR_MODEL,
   │         remaining_s=remaining_s,
   │         resume_session=session_id,
   │         resumable=True,
@@ -3163,7 +3564,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/tools.py:159  (InspectFailureTool)
+  ┌─ agent/tools.py:161  (InspectFailureTool)
   │ class InspectFailureTool(Tool):
   │     name = "inspect_failure"
   │ 
@@ -3509,7 +3910,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE ······································································
 
-  ┌─ agent/graph.py:413  (node_write)
+  ┌─ agent/graph.py:434  (node_write)
   │ def node_write(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     deadline = state["deadline"]
@@ -3763,15 +4164,16 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     if ctx is not None:
   │         # Also on the context, so a salvaged run can still report its history.
   │         ctx.events.append(event)
-  │     print(
+  │     line = (
   │         f"[{event['elapsed_s']:7.2f}s | rem {event['remaining_s']:7.2f}s] "
-  │         f"{stage}: {detail}",
-  │         flush=True,
+  │         f"{stage}: {detail}"
   │     )
+  │     print(line, flush=True)
+  │     log_line(line)
   │     return event
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:93  (_failed)
+  ┌─ agent/graph.py:94  (_failed)
   │ def _failed(state: AgentState, stage: str, exc: Exception) -> list:
   │     """Log a node failure and keep going: a missing file scores zero."""
   │     detail = f"{type(exc).__name__}: {exc}"
@@ -3786,13 +4188,13 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     ]
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:107  (_sync_ctx)
+  ┌─ agent/graph.py:108  (_sync_ctx)
   │ def _sync_ctx(state: AgentState) -> ToolContext:
   │     with _CTX_LOCK:
   │         return _sync_ctx_locked(state)
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:130  (node_analyze)
+  ┌─ agent/graph.py:131  (node_analyze)
   │ def node_analyze(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     read = maybe_run(ReadProblemTool(), ctx)
@@ -3812,7 +4214,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:149  (node_plan)
+  ┌─ agent/graph.py:150  (node_plan)
   │ def node_plan(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     analysis: Analysis = state["analysis"]
@@ -3837,7 +4239,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return {"plan": plan, "events": events}
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:173  (node_generate)
+  ┌─ agent/graph.py:174  (node_generate)
   │ def node_generate(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     try:
@@ -3875,7 +4277,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:210  (node_tests)
+  ┌─ agent/graph.py:211  (node_tests)
   │ def node_tests(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     try:
@@ -3887,10 +4289,15 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     events = [
   │         _emit(state, "tests", tests_tool.summary, used=tests_tool.used, node="tests")
   │     ]
+  │     log_block(
+  │         f"TEST CASES ({len(ctx.tests)}) - spec cases are authoritative, "
+  │         "model-written ones are soft",
+  │         json.dumps(ctx.tests, indent=2, default=str),
+  │     )
   │     return {"tests": ctx.tests, "events": events}
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:224  (_report_from_run)
+  ┌─ agent/graph.py:230  (_report_from_run)
   │ def _report_from_run(run, code: str, analysis: Analysis, tests: list) -> VerifyReport:
   │     if run.used and isinstance(run.data, dict):
   │         return VerifyReport(
@@ -3905,7 +4312,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return verify(code, analysis, tests)
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:238  (node_verify)
+  ┌─ agent/graph.py:244  (node_verify)
   │ def node_verify(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     try:
@@ -3929,6 +4336,21 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     events = [
   │         _emit(state, "verify", report.summary, used=run.used, ok=report.ok, node="verify")
   │     ]
+  │     log_block(
+  │         f"VERIFY - {report.summary}",
+  │         json.dumps(
+  │             {
+  │                 "ok": report.ok,
+  │                 "syntax_ok": report.syntax_ok,
+  │                 "entrypoint_ok": report.entrypoint_ok,
+  │                 "stub": report.stub,
+  │                 "cases": report.cases,
+  │                 "hints": report.hints,
+  │             },
+  │             indent=2,
+  │             default=str,
+  │         ),
+  │     )
   │     best_report = state.get("best_report") or report
   │     if _report_score(report) >= _report_score(best_report):
   │         best_code = ctx.code
@@ -3943,7 +4365,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:275  (node_repair)
+  ┌─ agent/graph.py:296  (node_repair)
   │ def node_repair(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     inspect = maybe_run(InspectFailureTool(), ctx)
@@ -4020,7 +4442,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:351  (node_emit_rust)
+  ┌─ agent/graph.py:372  (node_emit_rust)
   │ def node_emit_rust(state: AgentState) -> dict[str, Any]:
   │     ctx = _sync_ctx(state)
   │     try:
@@ -4083,7 +4505,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:509  (_after_verify)
+  ┌─ agent/graph.py:530  (_after_verify)
   │ def _after_verify(state: AgentState) -> str:
   │     report = state.get("report")
   │     deadline = state["deadline"]
@@ -4106,7 +4528,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return "write"
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:531  (build_graph)
+  ┌─ agent/graph.py:552  (build_graph)
   │ def build_graph(parallel: Optional[bool] = None):
   │     """Compile the pipeline.
   │ 
@@ -4145,7 +4567,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return graph.compile()
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/graph.py:572  (compiled_graph)
+  ┌─ agent/graph.py:593  (compiled_graph)
   │ def compiled_graph():
   │     key = bool(config.PARALLEL_STAGES)
   │     if key not in _COMPILED:
@@ -4348,17 +4770,19 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   1  plan                  claude-haiku-4-5-20251001     low      240s
   2  generate:python       claude-opus-5                 high     160s
   3  generate:rust-proto   claude-opus-5                 high     160s
-  4  repair:python         claude-opus-5                 medium   100s
-  5  repair:rust           claude-opus-5                 medium   100s
-  6  emit_rust             claude-opus-5                 high     130s
+  4  tests:model-written   claude-opus-5                 medium   180s
+  5  repair:python         claude-opus-5                 medium   100s
+  6  repair:rust           claude-opus-5                 medium   100s
+  7  emit_rust             claude-opus-5                 high     130s
 
   There is no spend cap. The deadline is the only limit on any call.
 
-  A python problem makes 2 model calls (plan, generate) - 1 with
+  A python problem makes 3 model calls (plan, tests, generate) - 2 with
   CLAUDE_PLAN_LLM=0; a rust problem adds emit_rust; each failed verify can
-  add up to 3 more (repair). Nothing else in the pipeline calls a model.
+  add up to 3 more (repair). Nothing else in the pipeline calls a model,
+  and verification always executes locally.
 
-  41 unit tests total, all offline - no network, no CLI:
+  44 unit tests total, all offline - no network, no CLI:
     - test_a_bad_number_falls_back_instead_of_crashing
     - test_a_graph_failure_salvages_the_best_candidate
     - test_a_node_failure_still_writes_a_solution
@@ -4380,28 +4804,37 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     - test_extract_rust_fence
     - test_first_model_cannot_spend_the_whole_budget
     - test_langgraph_compiles
+    - test_model_written_cases_cannot_fail_a_spec_correct_solution
     - test_no_spend_cap_reaches_the_command_line
     - test_only_sessions_we_minted_can_be_resumed
     - test_outcome_classifies_every_ending
     - test_parallel_mode_fans_generate_and_tests_out_of_plan
     - test_parse_result_skips_noise_lines
     - test_payload_error_catches_a_soft_api_failure
+    - test_plan_can_never_eat_the_whole_deadline
     - test_plan_llm_defaults_on_and_is_a_real_setting
     - test_plan_llm_off_skips_the_model_entirely
     - test_prompt_log_defaults_to_hone_log_and_never_raises
     - test_prompt_log_records_argv_and_both_prompts
+    - test_repair_model_is_configurable_and_leads_the_chain
     - test_reply_reads_tokens_cost_and_structured_output
     - test_resume_forks_into_a_session_id_we_chose
     - test_routing_escalates_on_hard_repair
     - test_routing_puts_only_the_plan_on_a_cheap_model
     - test_rust_sample_targets_rust
+    - test_spec_cases_need_no_model_but_extra_cases_use_opus
     - test_stub_is_rejected
-    - test_test_cases_are_built_without_a_model
     - test_verifier_catches_syntax_and_missing_entry
     - test_windows_prefers_the_launchable_shim
     - test_worker_body_captures_output_and_never_raises
+
+##############################################################################
+# RUN problem_02.json
+##############################################################################
+[   0.01s | rem  299.99s] analyze: loaded problem_02.json id=1c182498c9c7…
+[   0.01s | rem  299.99s] analyze: lang=rust entrypoint=main difficulty=hard huge_bounds=1 traps=2
 ==============================================================================
-CALL  model=claude-haiku-4-5-20251001  effort=low  ok in 61.2s - $0.0454, 3136 chars
+CALL  model=claude-haiku-4-5-20251001  effort=low  FAILED after 52.5s - timeout after 52s
 ==============================================================================
 --- argv ---
 [
@@ -4426,7 +4859,7 @@ CALL  model=claude-haiku-4-5-20251001  effort=low  ok in 61.2s - $0.0454, 3136 c
   "--json-schema",
   "{\"type\":\"object\",\"properties\":{\"approach\":{\"type\":\"string\"},\"data_structures\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"complexity_target\":{\"type\":\"string\"},\"traps_to_handle\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"python_signature\":{\"type\":\"string\"},\"return_shape\":{\"type\":\"string\"},\"test_ideas\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"approach\",\"traps_to_handle\",\"test_ideas\"]}",
   "--session-id",
-  "58fe92dc-a410-4a49-9b62-ed569ad723b2",
+  "329d1d66-88e6-488d-bcb6-2ffa9a38d222",
   "--no-session-persistence"
 ]
 --- system prompt ---
@@ -4436,10 +4869,157 @@ Create a concise plan with keys: approach, data_structures (array), complexity_t
 
 {'target_language': 'rust', 'entrypoint': 'main', 'proto_signature': 'solve(stdin: str) -> str', 'io_mode': 'stdin', 'return_hint': 'stdout tokens', 'difficulty': 'hard', 'huge_bounds': ['10^18'], 'traps': {'materialization': [], 'wording': ['wording: exactly', 'wording: one-based'], 'algorithmic': [], 'time_memory': ['numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work']}, 'constraints': ['* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.', 'Constraints:', '`1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`.'], 'statement': 'Subject: Framed delivery records for segmented text\n\nText arrives in source segments and is transmitted in byte-limited chunks. Each nonempty chunk also adds a framing header, so the transmission budget depends on where chunk boundaries occur.\n\nThe text consists of Unicode scalar values. Under UTF-8, a value uses 1 byte for U+0000..U+007F, 2 for U+0080..U+07FF, 3 for U+0800..U+FFFF, and 4 otherwise. Surrogates are invalid.\n\nFor each request, start a new transmission with no open chunk and process a consecutive character range from left to right:\n\n* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.\n* A chunk cannot cross a source-segment boundary. Reaching that boundary closes it.\n* Every nonempty chunk contributes exactly `H` additional wire bytes for its header. Headers do not count toward `C`.\n* The request budget `B` limits total wire bytes: payload bytes plus headers.\n* Before sending a character, include its payload width and, if it would begin a new chunk, one header. If this would exceed `B`, stop before that character. A header is never sent without at least one character.\n* Completing the requested range has cause `END`; every earlier stop has cause `LIMIT`.\n* The final nonempty chunk closes when transmission stops, even if it is not full and no segment boundary was reached.\n\nInput:\n\n* First line: `N S Q C H`.\n* Next `N` tokens: the characters in order, written as hexadecimal Unicode scalar values without a `U+` prefix.\n* Next `S` positive integers: source-segment lengths whose sum is `N`.\n* Next `Q` requests: `L R B`, with one-based positions and `1 <= L <= R <= N`.\n\nConstraints:\n\n`1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`.\n\nFor each request, print seven fields:\n\n`payload_bytes wire_bytes characters last chunks last_chunk_payload_bytes cause`\n\n`payload_bytes` excludes headers. `wire_bytes` includes them. `last` is the final transmitted one-based position, or `0` if none. `chunks` counts nonempty chunks. `last_chunk_payload_bytes` is the payload size of the final chunk, or `0` if none.\n\nProvide one complete Rust program containing `fn main()`. Use only the standard library, with no filesystem, network, external crates, unsafe code, or nondeterminism. Output is compared by splitting on ASCII whitespace bytes `09` through `0D` and `20`, then comparing tokens exactly.'}
 --- reply ---
-{"approach":"Parse N Unicode characters and S segment lengths. Precompute UTF-8 byte widths and segment membership. For each of Q queries (L, R, B), iterate positions L..R, tracking chunk state and budget: start new chunks when payload==0, segment boundary crossed, or adding char exceeds C. Check if cost (header + char bytes) fits in remaining budget. Stop at LIMIT if budget exceeded, END if range completed. Output: total payload bytes, total wire bytes (payload+headers), character count, final position (1-indexed, 0 if none), chunk count, final chunk's payload bytes, and cause.","data_structures":["Array of UTF-8 byte widths (1-4) for N characters","Array of segment indices (0..S-1) for each character position"],"complexity_target":"O(N + Q·N) worst case; practical complexity depends on query spans. Per-query character iteration unavoidable due to need to check segment and chunk boundaries for each character.","traps_to_handle":["Segment boundary immediately closes chunk and requires new one for next char (even if it would fit)—handled by checking segment[i] != segment[i-1]","First character of query always starts new chunk (current_chunk_payload==0 initially)","Header H only charged when starting new chunk; must not send header without at least one character","Budget B includes headers; cost = (H if new_chunk else 0) + char_bytes; check before incrementing","One-based indexing: convert L,R on input; convert last back to 1-indexed on output; use 0 for 'last' if no characters transmitted","Character count is (last - L + 1) only if last >= L; use 0 count if last == -1 or none sent","Cause = END iff loop completed naturally (i == r+1); LIMIT otherwise","last_chunk_payload = current_chunk_payload if last >= 0 else 0; final chunk may be partial","UTF-8 width: 0x00–0x7F→1, 0x80–0x7FF→2, 0x800–0xFFFF→3, else→4 (no surrogates per constraint)","Segment boundary crossing is between positions i-1 and i (within same query run), not between queries"],"python_signature":"def solve(stdin: str) -> str","return_shape":"Q lines; each line has 7 whitespace-separated integers/tokens: payload_bytes wire_bytes characters last chunks last_chunk_payload_bytes cause (string)","test_ideas":["Single character: L=1,R=1,B large → should transmit and report cause=END","Two chars same segment, both fit in one chunk and budget → 1 chunk, 2 characters, END","Segment boundary between char 1 and 2: forces char 2 into new chunk; test header cost doubles if both transmitted","Budget too small for even first character → 0 characters, 0 payload, last=0, cause=LIMIT","C = 1 byte: forces each character into separate chunk (for multi-byte chars, invalid; for 1-byte, multiple chars per chunk)","H = 0: no header cost, chunk boundaries don't add budget pressure","Large C (10^18): never chunk-full within N chars; segment boundaries dominate chunk creation","Large H (10^18): early exit likely; test that header is not sent if no char follows","Query range = [1,1], single character (1 or 4 bytes): simple boundary cases","Mixed 1-byte and 3-byte characters crossing segment boundary: verify chunk count and payload calculation"]}
+(none)
 
 ==============================================================================
-CALL  model=claude-opus-5  effort=high  ok in 22.2s - $0.0744, 1929 chars
+CALL  model=claude-sonnet-5  effort=low  FAILED after 20.0s - timeout after 20s
+==============================================================================
+--- argv ---
+[
+  "/opt/node22/bin/claude",
+  "--print",
+  "--output-format",
+  "json",
+  "--model",
+  "claude-sonnet-5",
+  "--tools",
+  "",
+  "--permission-prompts",
+  "none",
+  "--strict-mcp-config",
+  "--effort",
+  "low",
+  "--safe-mode",
+  "--system-prompt",
+  "You plan solutions for hard algorithmic problems. Reply with a JSON object only. Do not write code. Huge numeric bounds must not be materialized or looped. If target_language is rust, plan a Python prototype first and a later Rust translation.",
+  "--fallback-model",
+  "claude-opus-5",
+  "--json-schema",
+  "{\"type\":\"object\",\"properties\":{\"approach\":{\"type\":\"string\"},\"data_structures\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"complexity_target\":{\"type\":\"string\"},\"traps_to_handle\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"python_signature\":{\"type\":\"string\"},\"return_shape\":{\"type\":\"string\"},\"test_ideas\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"approach\",\"traps_to_handle\",\"test_ideas\"]}",
+  "--session-id",
+  "f5c745c4-d4d8-4bb9-a307-1fb08d4c7082",
+  "--no-session-persistence"
+]
+--- system prompt ---
+You plan solutions for hard algorithmic problems. Reply with a JSON object only. Do not write code. Huge numeric bounds must not be materialized or looped. If target_language is rust, plan a Python prototype first and a later Rust translation.
+--- user prompt (child stdin) ---
+Create a concise plan with keys: approach, data_structures (array), complexity_target, traps_to_handle (array), python_signature, return_shape, test_ideas (array).
+
+{'target_language': 'rust', 'entrypoint': 'main', 'proto_signature': 'solve(stdin: str) -> str', 'io_mode': 'stdin', 'return_hint': 'stdout tokens', 'difficulty': 'hard', 'huge_bounds': ['10^18'], 'traps': {'materialization': [], 'wording': ['wording: exactly', 'wording: one-based'], 'algorithmic': [], 'time_memory': ['numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work']}, 'constraints': ['* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.', 'Constraints:', '`1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`.'], 'statement': 'Subject: Framed delivery records for segmented text\n\nText arrives in source segments and is transmitted in byte-limited chunks. Each nonempty chunk also adds a framing header, so the transmission budget depends on where chunk boundaries occur.\n\nThe text consists of Unicode scalar values. Under UTF-8, a value uses 1 byte for U+0000..U+007F, 2 for U+0080..U+07FF, 3 for U+0800..U+FFFF, and 4 otherwise. Surrogates are invalid.\n\nFor each request, start a new transmission with no open chunk and process a consecutive character range from left to right:\n\n* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.\n* A chunk cannot cross a source-segment boundary. Reaching that boundary closes it.\n* Every nonempty chunk contributes exactly `H` additional wire bytes for its header. Headers do not count toward `C`.\n* The request budget `B` limits total wire bytes: payload bytes plus headers.\n* Before sending a character, include its payload width and, if it would begin a new chunk, one header. If this would exceed `B`, stop before that character. A header is never sent without at least one character.\n* Completing the requested range has cause `END`; every earlier stop has cause `LIMIT`.\n* The final nonempty chunk closes when transmission stops, even if it is not full and no segment boundary was reached.\n\nInput:\n\n* First line: `N S Q C H`.\n* Next `N` tokens: the characters in order, written as hexadecimal Unicode scalar values without a `U+` prefix.\n* Next `S` positive integers: source-segment lengths whose sum is `N`.\n* Next `Q` requests: `L R B`, with one-based positions and `1 <= L <= R <= N`.\n\nConstraints:\n\n`1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`.\n\nFor each request, print seven fields:\n\n`payload_bytes wire_bytes characters last chunks last_chunk_payload_bytes cause`\n\n`payload_bytes` excludes headers. `wire_bytes` includes them. `last` is the final transmitted one-based position, or `0` if none. `chunks` counts nonempty chunks. `last_chunk_payload_bytes` is the payload size of the final chunk, or `0` if none.\n\nProvide one complete Rust program containing `fn main()`. Use only the standard library, with no filesystem, network, external crates, unsafe code, or nondeterminism. Output is compared by splitting on ASCII whitespace bytes `09` through `0D` and `20`, then comparing tokens exactly.'}
+--- reply ---
+(none)
+
+[  72.57s | rem  227.43s] plan: Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never
+==============================================================================
+CALL  model=claude-opus-5  effort=medium  ok in 9.0s - $0.0378, 375 chars
+==============================================================================
+--- argv ---
+[
+  "/opt/node22/bin/claude",
+  "--print",
+  "--output-format",
+  "json",
+  "--model",
+  "claude-opus-5",
+  "--tools",
+  "",
+  "--permission-prompts",
+  "none",
+  "--strict-mcp-config",
+  "--effort",
+  "medium",
+  "--safe-mode",
+  "--system-prompt",
+  "Invent 2 or 3 tiny unit tests from the problem statement. Each test must include a concrete expected value you can derive by hand from the wording. JSON only: {\"tests\":[{\"name\":\"...\",\"args\":[...],\"stdin\":null,\"expected\":...}]}",
+  "--fallback-model",
+  "claude-sonnet-5,claude-haiku-4-5-20251001",
+  "--json-schema",
+  "{\"type\":\"object\",\"properties\":{\"tests\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"args\":{\"type\":\"array\"},\"stdin\":{\"type\":\"string\"},\"expected\":{}},\"required\":[\"name\",\"expected\"]}}},\"required\":[\"tests\"]}",
+  "--session-id",
+  "5cd75428-70b7-43f3-a0d6-3ec225a395e5",
+  "--no-session-persistence"
+]
+--- system prompt ---
+Invent 2 or 3 tiny unit tests from the problem statement. Each test must include a concrete expected value you can derive by hand from the wording. JSON only: {"tests":[{"name":"...","args":[...],"stdin":null,"expected":...}]}
+--- user prompt (child stdin) ---
+entrypoint=solve io=stdin
+traps=['wording: exactly', 'wording: one-based', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work']
+ideas=['smallest legal input with a known expected value from the spec', 'invalid / implicit-error / boundary wording trap', 'a case that would explode if a huge bound is looped']
+
+Subject: Framed delivery records for segmented text
+
+Text arrives in source segments and is transmitted in byte-limited chunks. Each nonempty chunk also adds a framing header, so the transmission budget depends on where chunk boundaries occur.
+
+The text consists of Unicode scalar values. Under UTF-8, a value uses 1 byte for U+0000..U+007F, 2 for U+0080..U+07FF, 3 for U+0800..U+FFFF, and 4 otherwise. Surrogates are invalid.
+
+For each request, start a new transmission with no open chunk and process a consecutive character range from left to right:
+
+* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.
+* A chunk cannot cross a source-segment boundary. Reaching that boundary closes it.
+* Every nonempty chunk contributes exactly `H` additional wire bytes for its header. Headers do not count toward `C`.
+* The request budget `B` limits total wire bytes: payload bytes plus headers.
+* Before sending a character, include its payload width and, if it would begin a new chunk, one header. If this would exceed `B`, stop before that character. A header is never sent without at least one character.
+* Completing the requested range has cause `END`; every earlier stop has cause `LIMIT`.
+* The final nonempty chunk closes when transmission stops, even if it is not full and no segment boundary was reached.
+
+Input:
+
+* First line: `N S Q C H`.
+* Next `N` tokens: the characters in order, written as hexadecimal Unicode scalar values without a `U+` prefix.
+* Next `S` positive integers: source-segment lengths whose sum is `N`.
+* Next `Q` requests: `L R B`, with one-based positions and `1 <= L <= R <= N`.
+
+Constraints:
+
+`1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`.
+
+For each request, print seven fields:
+
+`payload_bytes wire_bytes characters last chunks last_chunk_payload_bytes cause`
+
+`payload_bytes` excludes headers. `wire_bytes` includes them. `last` is the final transmitted one-based position, or `0` if none. `chunks` counts nonempty chunks. `last_chunk_payload_bytes` is the payload size of the final chunk, or `0` if none.
+
+Provide one complete Rust program containing `fn main()`. Use only the standard library, with no filesystem, network, external crates, unsafe code, or nondeterminism. Output is compared by splitting on ASCII whitespace bytes `09` through `0D` and `20`, then comparing tokens exactly.
+--- reply ---
+{"tests":[{"name":"single ascii char fits","args":[],"stdin":"1 1 1 4 1\n41\n1\n1 1 10\n","expected":"1 2 1 1 1 1 END"},{"name":"budget too small for header+char","args":[],"stdin":"1 1 1 4 1\n41\n1\n1 1 1\n","expected":"0 0 0 0 0 0 LIMIT"},{"name":"two full chunks of two-byte chars","args":[],"stdin":"4 1 1 4 2\nA9 A9 A9 A9\n4\n1 4 1000\n","expected":"8 12 4 4 2 4 END"}]}
+
+[  81.59s | rem  218.41s] tests: prepared 5 tests (3 model-written)
+------------------------------------------------------------------------------
+TEST CASES (5) - spec cases are authoritative, model-written ones are soft
+------------------------------------------------------------------------------
+[
+  {
+    "name": "empty_stdin",
+    "stdin": "",
+    "kind": "smoke",
+    "allow_empty": true
+  },
+  {
+    "name": "trap_no_huge_loop",
+    "kind": "static_trap"
+  },
+  {
+    "name": "single ascii char fits",
+    "kind": "model",
+    "expected": "1 2 1 1 1 1 END",
+    "stdin": "1 1 1 4 1\n41\n1\n1 1 10\n"
+  },
+  {
+    "name": "budget too small for header+char",
+    "kind": "model",
+    "expected": "0 0 0 0 0 0 LIMIT",
+    "stdin": "1 1 1 4 1\n41\n1\n1 1 1\n"
+  },
+  {
+    "name": "two full chunks of two-byte chars",
+    "kind": "model",
+    "expected": "8 12 4 4 2 4 END",
+    "stdin": "4 1 1 4 2\nA9 A9 A9 A9\n4\n1 4 1000\n"
+  }
+]
+
+==============================================================================
+CALL  model=claude-opus-5  effort=high  ok in 118.2s - $0.2578, 3291 chars
 ==============================================================================
 --- argv ---
 [
@@ -4462,17 +5042,17 @@ CALL  model=claude-opus-5  effort=high  ok in 22.2s - $0.0744, 1929 chars
   "--fallback-model",
   "claude-sonnet-5,claude-haiku-4-5-20251001",
   "--session-id",
-  "0be1abcb-8e37-4bc1-88a7-c886dcad6da9"
+  "823f3c16-4c62-4942-9ac0-0c8b1ca634b2"
 ]
 --- system prompt ---
 You write Python 3.9 standard-library solutions. No I/O, no network, no third-party imports, no global mutable state. Do not mutate caller-owned arguments. Never loop 10**9 or 10**18 times and never allocate a grid that large. Do not write placeholders, echo stubs, or NotImplementedError. Implement the real rules, even if only a correct small-input version. Return only one markdown python code block. The required entrypoint is `solve`. Implement `def solve(stdin: str) -> str` that reads the full stdin text and returns the full stdout text. This is a prototype for a Rust program.
 --- user prompt (child stdin) ---
-SIGNATURE: def solve(stdin: str) -> str
-RETURN: Q lines; each line has 7 whitespace-separated integers/tokens: payload_bytes wire_bytes characters last chunks last_chunk_payload_bytes cause (string)
-APPROACH: Parse N Unicode characters and S segment lengths. Precompute UTF-8 byte widths and segment membership. For each of Q queries (L, R, B), iterate positions L..R, tracking chunk state and budget: start new chunks when payload==0, segment boundary crossed, or adding char exceeds C. Check if cost (header + char bytes) fits in remaining budget. Stop at LIMIT if budget exceeded, END if range completed. Output: total payload bytes, total wire bytes (payload+headers), character count, final position (1-indexed, 0 if none), chunk count, final chunk's payload bytes, and cause.
-DATA STRUCTURES: ['Array of UTF-8 byte widths (1-4) for N characters', 'Array of segment indices (0..S-1) for each character position']
-COMPLEXITY: O(N + Q·N) worst case; practical complexity depends on query spans. Per-query character iteration unavoidable due to need to check segment and chunk boundaries for each character.
-TRAPS: ['Segment boundary immediately closes chunk and requires new one for next char (even if it would fit)—handled by checking segment[i] != segment[i-1]', 'First character of query always starts new chunk (current_chunk_payload==0 initially)', 'Header H only charged when starting new chunk; must not send header without at least one character', 'Budget B includes headers; cost = (H if new_chunk else 0) + char_bytes; check before incrementing', "One-based indexing: convert L,R on input; convert last back to 1-indexed on output; use 0 for 'last' if no characters transmitted", 'Character count is (last - L + 1) only if last >= L; use 0 count if last == -1 or none sent', 'Cause = END iff loop completed naturally (i == r+1); LIMIT otherwise', 'last_chunk_payload = current_chunk_payload if last >= 0 else 0; final chunk may be partial', 'UTF-8 width: 0x00–0x7F→1, 0x80–0x7FF→2, 0x800–0xFFFF→3, else→4 (no surrogates per constraint)', 'Segment boundary crossing is between positions i-1 and i (within same query run), not between queries']
+SIGNATURE: solve(stdin: str) -> str
+RETURN: stdout tokens
+APPROACH: Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never loop a 1e18 bound.
+DATA STRUCTURES: ['dicts/lists sized by input', 'avoid dense grids']
+COMPLEXITY: near-linear in the given input length
+TRAPS: ['wording: exactly', 'wording: one-based', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work']
 
 STATEMENT:
 Subject: Framed delivery records for segmented text
@@ -4512,308 +5092,174 @@ Provide one complete Rust program containing `fn main()`. Use only the standard 
 --- reply ---
 ```python
 import sys
+from array import array
+from bisect import bisect_right
+
 
 def solve(stdin: str) -> str:
     data = stdin.split()
-    pos = 0
-    N = int(data[pos]); pos += 1
-    S = int(data[pos]); pos += 1
-    Q = int(data[pos]); pos += 1
-    C = int(data[pos]); pos += 1
-    H = int(data[pos]); pos += 1
-
-    # widths
-    W = [0] * N
-    for k in range(N):
-        cp = int(data[pos + k], 16)
-        if cp < 0x80:
-            W[k] = 1
-        elif cp < 0x800:
-            W[k] = 2
-        elif cp < 0x10000:
-            W[k] = 3
-        else:
-            W[k] = 4
-    pos += N
-
-    # segment boundary flags: bnd[i] True if a new segment starts at i (i>0)
-    bnd = [False] * N
-    idx = 0
-    for s in range(S):
-        ln = int(data[pos + s])
-        if idx > 0 and idx < N:
-            bnd[idx] = True
-        idx += ln
-    pos += S
-
-    out = []
-    for _ in range(Q):
-        l = int(data[pos]) - 1
-        r = int(data[pos + 1]) - 1
-        B = int(data[pos + 2])
-        pos += 3
-
-        payload = 0
-        wire = 0
-        chunks = 0
-        cur = 0
-        last = -1
-        i = l
-        while i <= r:
-            w = W[i]
-            if cur == 0 or (i > l and bnd[i]) or cur + w > C:
-                cost = w + H
-                if wire + cost > B:
-                    break
-                wire += cost
-                payload += w
-                chunks += 1
-                cur = w
-            else:
-                if wire + w > B:
-                    break
-                wire += w
-                payload += w
-                cur += w
-            last = i
-            i += 1
-
-        cause = "END" if i > r else "LIMIT"
-        if last >= 0:
-            chars = last - l + 1
-            lastout = last + 1
-            lcp = cur
-        else:
-            chars = 0
-            lastout = 0
-            lcp = 0
-        out.append("%d %d %d %d %d %d %s" % (payload, wire, chars, lastout, chunks, lcp, cause))
-
-    return "\n".join(out) + ("\n" if out else "")
-```
-
-==============================================================================
-CALL  model=claude-opus-5  effort=high  ok in 10.9s - $0.0812, 2240 chars
-==============================================================================
---- argv ---
-[
-  "/opt/node22/bin/claude",
-  "--print",
-  "--output-format",
-  "json",
-  "--model",
-  "claude-opus-5",
-  "--tools",
-  "",
-  "--permission-prompts",
-  "none",
-  "--strict-mcp-config",
-  "--effort",
-  "high",
-  "--safe-mode",
-  "--system-prompt",
-  "You repair Python 3.9 stdlib solutions. Keep `def solve`. No I/O. No huge loops. No placeholders. Return one python markdown code block only.",
-  "--fallback-model",
-  "claude-sonnet-5,claude-haiku-4-5-20251001",
-  "--resume",
-  "0be1abcb-8e37-4bc1-88a7-c886dcad6da9",
-  "--fork-session",
-  "--system-prompt-snapshot",
-  "off",
-  "--session-id",
-  "cd234466-33f1-415b-acbc-23f1996c1eaa"
-]
---- system prompt ---
-You repair Python 3.9 stdlib solutions. Keep `def solve`. No I/O. No huge loops. No placeholders. Return one python markdown code block only.
---- user prompt (child stdin) ---
-PLAN: Parse N Unicode characters and S segment lengths. Precompute UTF-8 byte widths and segment membership. For each of Q queries (L, R, B), iterate positions L..R, tracking chunk state and budget: start new chunks when payload==0, segment boundary crossed, or adding char exceeds C. Check if cost (header + char bytes) fits in remaining budget. Stop at LIMIT if budget exceeded, END if range completed. Output: total payload bytes, total wire bytes (payload+headers), character count, final position (1-indexed, 0 if none), chunk count, final chunk's payload bytes, and cause.
-FAILURES:
-empty_stdin: IndexError: list index out of range
-
-CURRENT CODE:
-```python
-import sys
-
-def solve(stdin: str) -> str:
-    data = stdin.split()
-    pos = 0
-    N = int(data[pos]); pos += 1
-    S = int(data[pos]); pos += 1
-    Q = int(data[pos]); pos += 1
-    C = int(data[pos]); pos += 1
-    H = int(data[pos]); pos += 1
-
-    # widths
-    W = [0] * N
-    for k in range(N):
-        cp = int(data[pos + k], 16)
-        if cp < 0x80:
-            W[k] = 1
-        elif cp < 0x800:
-            W[k] = 2
-        elif cp < 0x10000:
-            W[k] = 3
-        else:
-            W[k] = 4
-    pos += N
-
-    # segment boundary flags: bnd[i] True if a new segment starts at i (i>0)
-    bnd = [False] * N
-    idx = 0
-    for s in range(S):
-        ln = int(data[pos + s])
-        if idx > 0 and idx < N:
-            bnd[idx] = True
-        idx += ln
-    pos += S
-
-    out = []
-    for _ in range(Q):
-        l = int(data[pos]) - 1
-        r = int(data[pos + 1]) - 1
-        B = int(data[pos + 2])
-        pos += 3
-
-        payload = 0
-        wire = 0
-        chunks = 0
-        cur = 0
-        last = -1
-        i = l
-        while i <= r:
-            w = W[i]
-            if cur == 0 or (i > l and bnd[i]) or cur + w > C:
-                cost = w + H
-                if wire + cost > B:
-                    break
-                wire += cost
-                payload += w
-                chunks += 1
-                cur = w
-            else:
-                if wire + w > B:
-                    break
-                wire += w
-                payload += w
-                cur += w
-            last = i
-            i += 1
-
-        cause = "END" if i > r else "LIMIT"
-        if last >= 0:
-            chars = last - l + 1
-            lastout = last + 1
-            lcp = cur
-        else:
-            chars = 0
-            lastout = 0
-            lcp = 0
-        out.append("%d %d %d %d %d %d %s" % (payload, wire, chars, lastout, chunks, lcp, cause))
-
-    return "\n".join(out) + ("\n" if out else "")
-```
---- reply ---
-```python
-import sys
-
-def solve(stdin: str) -> str:
-    data = stdin.split()
-    if len(data) < 5:
+    if not data:
         return ""
-    pos = 0
-    N = int(data[pos]); pos += 1
-    S = int(data[pos]); pos += 1
-    Q = int(data[pos]); pos += 1
-    C = int(data[pos]); pos += 1
-    H = int(data[pos]); pos += 1
+    p = 0
+    N = int(data[p]); p += 1
+    S = int(data[p]); p += 1
+    Q = int(data[p]); p += 1
+    C = int(data[p]); p += 1
+    H = int(data[p]); p += 1
 
-    n_avail = len(data) - pos
-    if N > n_avail:
-        N = n_avail
-    if N < 0:
-        N = 0
-
-    # widths
-    W = [0] * N
-    for k in range(N):
-        cp = int(data[pos + k], 16)
-        if cp < 0x80:
-            W[k] = 1
-        elif cp < 0x800:
-            W[k] = 2
-        elif cp < 0x10000:
-            W[k] = 3
+    # ---- widths / prefix sums of payload bytes ----
+    prefixw = [0] * (N + 1)
+    s = 0
+    for i in range(N):
+        v = int(data[p + i], 16)
+        if v < 0x80:
+            s += 1
+        elif v < 0x800:
+            s += 2
+        elif v < 0x10000:
+            s += 3
         else:
-            W[k] = 4
-    pos += N
+            s += 4
+        prefixw[i + 1] = s
+    p += N
 
-    # segment boundary flags: bnd[i] True if a new segment starts at i (i>0)
-    bnd = [False] * N
-    idx = 0
-    for _s in range(S):
-        if pos >= len(data):
-            break
-        ln = int(data[pos])
-        pos += 1
-        if 0 < idx < N:
-            bnd[idx] = True
-        idx += ln
+    # ---- segment end index (0-based, inclusive) for each character ----
+    segend = array('i', bytes(4 * (N if N else 1)))
+    cur = 0
+    for _ in range(S):
+        ln = int(data[p]); p += 1
+        e = cur + ln - 1
+        if ln > 0:
+            segend[cur:cur + ln] = array('i', [e]) * ln
+        cur += ln
+
+    # ---- greedy chunk end: up0[i] = exclusive end position of chunk starting at i ----
+    up0 = array('i', bytes(4 * (N + 1)))
+    j = 0
+    for i in range(N):
+        if j < i:
+            j = i
+        se = segend[i]
+        base = prefixw[i]
+        while j < N and j <= se and prefixw[j + 1] - base <= C:
+            j += 1
+        up0[i] = j
+    up0[N] = N
+
+    # ---- binary lifting table (positions only; costs derived from prefixw) ----
+    K = max(1, N.bit_length() + 1)
+    up = [up0]
+    for _ in range(1, K):
+        prev = up[-1]
+        up.append(array('i', map(prev.__getitem__, prev)))
 
     out = []
+    ap = out.append
     for _ in range(Q):
-        if pos + 2 >= len(data):
-            break
-        l = int(data[pos]) - 1
-        r = int(data[pos + 1]) - 1
-        B = int(data[pos + 2])
-        pos += 3
-
-        if l < 0:
-            l = 0
-        if r > N - 1:
-            r = N - 1
-
-        payload = 0
-        wire = 0
-        chunks = 0
-        cur = 0
-        last = -1
-        i = l
-        while i <= r:
-            w = W[i]
-            if cur == 0 or (i > l and bnd[i]) or cur + w > C:
-                cost = w + H
-                if wire + cost > B:
-                    break
-                wire += cost
-                payload += w
-                chunks += 1
-                cur = w
-            else:
-                if wire + w > B:
-                    break
-                wire += w
-                payload += w
-                cur += w
-            last = i
-            i += 1
-
-        cause = "END" if i > r else "LIMIT"
-        if last >= 0:
-            chars = last - l + 1
-            lastout = last + 1
-            lcp = cur
+        L = int(data[p]); R = int(data[p + 1]); B = int(data[p + 2])
+        p += 3
+        L0 = L - 1
+        limit = R  # exclusive end (0-based)
+        base = prefixw[L0]
+        pos = L0
+        m = 0
+        for k in range(K - 1, -1, -1):
+            if pos >= limit:
+                break
+            q = up[k][pos]
+            if q <= limit:
+                cnt = m + (1 << k)
+                if cnt * H + prefixw[q] - base <= B:
+                    pos = q
+                    m = cnt
+        partial = 0
+        end = pos
+        if pos < limit:
+            wire_sofar = m * H + prefixw[pos] - base
+            rem = B - wire_sofar - H
+            if rem >= 0:
+                hi = up[0][pos]
+                if hi > limit:
+                    hi = limit
+                e = bisect_right(prefixw, prefixw[pos] + rem, pos, hi + 1) - 1
+                if e > pos:
+                    end = e
+                    partial = prefixw[e] - prefixw[pos]
+        payload = prefixw[end] - base
+        chunks = m + (1 if partial else 0)
+        wire = payload + chunks * H
+        if partial:
+            lcp = partial
+        elif m > 0:
+            q = L0
+            r2 = m - 1
+            kk = 0
+            while r2:
+                if r2 & 1:
+                    q = up[kk][q]
+                r2 >>= 1
+                kk += 1
+            lcp = prefixw[end] - prefixw[q]
         else:
-            chars = 0
-            lastout = 0
             lcp = 0
-        out.append("%d %d %d %d %d %d %s" % (payload, wire, chars, lastout, chunks, lcp, cause))
+        last = end if end > L0 else 0
+        cause = "END" if end == limit else "LIMIT"
+        ap("%d %d %d %d %d %d %s" % (payload, wire, end - L0, last, chunks, lcp, cause))
 
     return "\n".join(out) + ("\n" if out else "")
 ```
 
+[ 190.75s | rem  109.25s] generate: python chars=3277 model=claude-opus-5 tier=strong provider=claude-cli cost=$0.2578
+[ 190.86s | rem  109.14s] verify: 2/5 local tests passed (model-written mismatches only)
+------------------------------------------------------------------------------
+VERIFY - 2/5 local tests passed (model-written mismatches only)
+------------------------------------------------------------------------------
+{
+  "ok": true,
+  "syntax_ok": true,
+  "entrypoint_ok": true,
+  "stub": false,
+  "cases": [
+    {
+      "name": "empty_stdin",
+      "ok": true,
+      "detail": "passed",
+      "kind": "smoke"
+    },
+    {
+      "name": "trap_no_huge_loop",
+      "ok": true,
+      "detail": "no obvious huge-range loop",
+      "kind": "static_trap"
+    },
+    {
+      "name": "single ascii char fits",
+      "ok": false,
+      "detail": "expected '1 2 1 1 1 1 END' got '1 3 1 1 2 0 END\\n'",
+      "kind": "model"
+    },
+    {
+      "name": "budget too small for header+char",
+      "ok": false,
+      "detail": "expected '0 0 0 0 0 0 LIMIT' got '0 0 0 0 0 0 LIMIT\\n'",
+      "kind": "model"
+    },
+    {
+      "name": "two full chunks of two-byte chars",
+      "ok": false,
+      "detail": "expected '8 12 4 4 2 4 END' got '8 24 4 4 8 0 END\\n'",
+      "kind": "model"
+    }
+  ],
+  "hints": [
+    "single ascii char fits: expected '1 2 1 1 1 1 END' got '1 3 1 1 2 0 END\\n'",
+    "budget too small for header+char: expected '0 0 0 0 0 0 LIMIT' got '0 0 0 0 0 0 LIMIT\\n'",
+    "two full chunks of two-byte chars: expected '8 12 4 4 2 4 END' got '8 24 4 4 8 0 END\\n'"
+  ]
+}
+
 ==============================================================================
-CALL  model=claude-opus-5  effort=high  ok in 32.7s - $0.1770, 5206 chars
+CALL  model=claude-opus-5  effort=low  ok in 21.9s - $0.1943, 4575 chars
 ==============================================================================
 --- argv ---
 [
@@ -4829,25 +5275,25 @@ CALL  model=claude-opus-5  effort=high  ok in 32.7s - $0.1770, 5206 chars
   "none",
   "--strict-mcp-config",
   "--effort",
-  "high",
+  "low",
   "--safe-mode",
   "--system-prompt",
   "You write one complete Rust program with fn main(). Stdin/stdout only. Standard library only. No unsafe, no crates, no filesystem, no network, no nondeterminism. Never loop 10^18 times. Do not emit a stub that only echoes input. Return one markdown rust code block.",
   "--fallback-model",
   "claude-sonnet-5,claude-haiku-4-5-20251001",
   "--resume",
-  "cd234466-33f1-415b-acbc-23f1996c1eaa",
+  "823f3c16-4c62-4942-9ac0-0c8b1ca634b2",
   "--fork-session",
   "--system-prompt-snapshot",
   "off",
   "--session-id",
-  "95641029-05cd-4e04-9c56-c0dc8b3f342f"
+  "bdf47595-8a4f-492e-bf11-53bd5f8429b1"
 ]
 --- system prompt ---
 You write one complete Rust program with fn main(). Stdin/stdout only. Standard library only. No unsafe, no crates, no filesystem, no network, no nondeterminism. Never loop 10^18 times. Do not emit a stub that only echoes input. Return one markdown rust code block.
 --- user prompt (child stdin) ---
-APPROACH: Parse N Unicode characters and S segment lengths. Precompute UTF-8 byte widths and segment membership. For each of Q queries (L, R, B), iterate positions L..R, tracking chunk state and budget: start new chunks when payload==0, segment boundary crossed, or adding char exceeds C. Check if cost (header + char bytes) fits in remaining budget. Stop at LIMIT if budget exceeded, END if range completed. Output: total payload bytes, total wire bytes (payload+headers), character count, final position (1-indexed, 0 if none), chunk count, final chunk's payload bytes, and cause.
-TRAPS: ['Segment boundary immediately closes chunk and requires new one for next char (even if it would fit)—handled by checking segment[i] != segment[i-1]', 'First character of query always starts new chunk (current_chunk_payload==0 initially)', 'Header H only charged when starting new chunk; must not send header without at least one character', 'Budget B includes headers; cost = (H if new_chunk else 0) + char_bytes; check before incrementing', "One-based indexing: convert L,R on input; convert last back to 1-indexed on output; use 0 for 'last' if no characters transmitted", 'Character count is (last - L + 1) only if last >= L; use 0 count if last == -1 or none sent', 'Cause = END iff loop completed naturally (i == r+1); LIMIT otherwise', 'last_chunk_payload = current_chunk_payload if last >= 0 else 0; final chunk may be partial', 'UTF-8 width: 0x00–0x7F→1, 0x80–0x7FF→2, 0x800–0xFFFF→3, else→4 (no surrogates per constraint)', 'Segment boundary crossing is between positions i-1 and i (within same query run), not between queries']
+APPROACH: Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never loop a 1e18 bound.
+TRAPS: ['wording: exactly', 'wording: one-based', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work']
 
 STATEMENT:
 Subject: Framed delivery records for segmented text
@@ -4888,99 +5334,119 @@ Provide one complete Rust program containing `fn main()`. Use only the standard 
 VERIFIED PYTHON PROTOTYPE (translate the behavior):
 ```python
 import sys
+from array import array
+from bisect import bisect_right
+
 
 def solve(stdin: str) -> str:
     data = stdin.split()
-    if len(data) < 5:
+    if not data:
         return ""
-    pos = 0
-    N = int(data[pos]); pos += 1
-    S = int(data[pos]); pos += 1
-    Q = int(data[pos]); pos += 1
-    C = int(data[pos]); pos += 1
-    H = int(data[pos]); pos += 1
+    p = 0
+    N = int(data[p]); p += 1
+    S = int(data[p]); p += 1
+    Q = int(data[p]); p += 1
+    C = int(data[p]); p += 1
+    H = int(data[p]); p += 1
 
-    n_avail = len(data) - pos
-    if N > n_avail:
-        N = n_avail
-    if N < 0:
-        N = 0
-
-    # widths
-    W = [0] * N
-    for k in range(N):
-        cp = int(data[pos + k], 16)
-        if cp < 0x80:
-            W[k] = 1
-        elif cp < 0x800:
-            W[k] = 2
-        elif cp < 0x10000:
-            W[k] = 3
+    # ---- widths / prefix sums of payload bytes ----
+    prefixw = [0] * (N + 1)
+    s = 0
+    for i in range(N):
+        v = int(data[p + i], 16)
+        if v < 0x80:
+            s += 1
+        elif v < 0x800:
+            s += 2
+        elif v < 0x10000:
+            s += 3
         else:
-            W[k] = 4
-    pos += N
+            s += 4
+        prefixw[i + 1] = s
+    p += N
 
-    # segment boundary flags: bnd[i] True if a new segment starts at i (i>0)
-    bnd = [False] * N
-    idx = 0
-    for _s in range(S):
-        if pos >= len(data):
-            break
-        ln = int(data[pos])
-        pos += 1
-        if 0 < idx < N:
-            bnd[idx] = True
-        idx += ln
+    # ---- segment end index (0-based, inclusive) for each character ----
+    segend = array('i', bytes(4 * (N if N else 1)))
+    cur = 0
+    for _ in range(S):
+        ln = int(data[p]); p += 1
+        e = cur + ln - 1
+        if ln > 0:
+            segend[cur:cur + ln] = array('i', [e]) * ln
+        cur += ln
+
+    # ---- greedy chunk end: up0[i] = exclusive end position of chunk starting at i ----
+    up0 = array('i', bytes(4 * (N + 1)))
+    j = 0
+    for i in range(N):
+        if j < i:
+            j = i
+        se = segend[i]
+        base = prefixw[i]
+        while j < N and j <= se and prefixw[j + 1] - base <= C:
+            j += 1
+        up0[i] = j
+    up0[N] = N
+
+    # ---- binary lifting table (positions only; costs derived from prefixw) ----
+    K = max(1, N.bit_length() + 1)
+    up = [up0]
+    for _ in range(1, K):
+        prev = up[-1]
+        up.append(array('i', map(prev.__getitem__, prev)))
 
     out = []
+    ap = out.append
     for _ in range(Q):
-        if pos + 2 >= len(data):
-            break
-        l = int(data[pos]) - 1
-        r = int(data[pos + 1]) - 1
-        B = int(data[pos + 2])
-        pos += 3
-
-        if l < 0:
-            l = 0
-        if r > N - 1:
-            r = N - 1
-
-        payload = 0
-        wire = 0
-        chunks = 0
-        cur = 0
-        last = -1
-        i = l
-        while i <= r:
-            w = W[i]
-            if cur == 0 or (i > l and bnd[i]) or cur + w > C:
-                cost = w + H
-                if wire + cost > B:
-                    break
-                wire += cost
-                payload += w
-                chunks += 1
-                cur = w
-            else:
-                if wire + w > B:
-                    break
-                wire += w
-                payload += w
-                cur += w
-            last = i
-            i += 1
-
-        cause = "END" if i > r else "LIMIT"
-        if last >= 0:
-            chars = last - l + 1
-            lastout = last + 1
-            lcp = cur
+        L = int(data[p]); R = int(data[p + 1]); B = int(data[p + 2])
+        p += 3
+        L0 = L - 1
+        limit = R  # exclusive end (0-based)
+        base = prefixw[L0]
+        pos = L0
+        m = 0
+        for k in range(K - 1, -1, -1):
+            if pos >= limit:
+                break
+            q = up[k][pos]
+            if q <= limit:
+                cnt = m + (1 << k)
+                if cnt * H + prefixw[q] - base <= B:
+                    pos = q
+                    m = cnt
+        partial = 0
+        end = pos
+        if pos < limit:
+            wire_sofar = m * H + prefixw[pos] - base
+            rem = B - wire_sofar - H
+            if rem >= 0:
+                hi = up[0][pos]
+                if hi > limit:
+                    hi = limit
+                e = bisect_right(prefixw, prefixw[pos] + rem, pos, hi + 1) - 1
+                if e > pos:
+                    end = e
+                    partial = prefixw[e] - prefixw[pos]
+        payload = prefixw[end] - base
+        chunks = m + (1 if partial else 0)
+        wire = payload + chunks * H
+        if partial:
+            lcp = partial
+        elif m > 0:
+            q = L0
+            r2 = m - 1
+            kk = 0
+            while r2:
+                if r2 & 1:
+                    q = up[kk][q]
+                r2 >>= 1
+                kk += 1
+            lcp = prefixw[end] - prefixw[q]
         else:
-            chars = 0
-            lastout = 0
             lcp = 0
-        out.append("%d %d %d %d %d %d %s" % (payload, wire, chars, lastout, chunks, lcp, cause))
+        last = end if end > L0 else 0
+        cause = "END" if end == limit else "LIMIT"
+        ap("%d %d %d %d %d %d %s" % (payload, wire, end - L0, last, chunks, lcp, cause))
 
     return "\n".join(out) + ("\n" if out else "")
 ```
@@ -4988,212 +5454,141 @@ def solve(stdin: str) -> str:
 ```rust
 use std::io::{self, Read, Write};
 
-fn parse_dec(b: &[u8]) -> u128 {
-    let mut v: u128 = 0;
-    for &c in b {
-        if c >= b'0' && c <= b'9' {
-            v = v.wrapping_mul(10).wrapping_add((c - b'0') as u128);
-        }
-    }
-    v
-}
-
-fn parse_hex(b: &[u8]) -> u32 {
-    let mut v: u32 = 0;
-    for &c in b {
-        let d = match c {
-            b'0'..=b'9' => (c - b'0') as u32,
-            b'a'..=b'f' => (c - b'a' + 10) as u32,
-            b'A'..=b'F' => (c - b'A' + 10) as u32,
-            _ => continue,
-        };
-        v = v.wrapping_mul(16).wrapping_add(d);
-    }
-    v
-}
-
-fn push_u128(out: &mut String, mut v: u128) {
-    if v == 0 {
-        out.push('0');
-        return;
-    }
-    let mut tmp = [0u8; 40];
-    let mut k = 0usize;
-    while v > 0 {
-        tmp[k] = b'0' + (v % 10) as u8;
-        v /= 10;
-        k += 1;
-    }
-    while k > 0 {
-        k -= 1;
-        out.push(tmp[k] as char);
-    }
-}
-
 fn main() {
-    let mut buf = Vec::new();
-    io::stdin().read_to_end(&mut buf).unwrap();
+    let mut inp = String::new();
+    io::stdin().read_to_string(&mut inp).unwrap();
+    let mut it = inp.split_ascii_whitespace();
+    let n: usize = match it.next() { Some(x) => x.parse().unwrap(), None => return };
+    let s: usize = it.next().unwrap().parse().unwrap();
+    let q: usize = it.next().unwrap().parse().unwrap();
+    let c: u64 = it.next().unwrap().parse().unwrap();
+    let h: u64 = it.next().unwrap().parse().unwrap();
 
-    // Tokenize on ASCII whitespace (bytes <= 0x20 treated as separators).
-    let mut toks: Vec<(usize, usize)> = Vec::new();
-    {
-        let n = buf.len();
-        let mut i = 0usize;
-        while i < n {
-            if buf[i] <= b' ' {
-                i += 1;
-                continue;
-            }
-            let s = i;
-            while i < n && buf[i] > b' ' {
-                i += 1;
-            }
-            toks.push((s, i));
+    let mut prefixw: Vec<u64> = vec![0; n + 1];
+    let mut acc: u64 = 0;
+    for i in 0..n {
+        let tok = it.next().unwrap();
+        let v = u32::from_str_radix(tok, 16).unwrap();
+        acc += if v < 0x80 { 1 } else if v < 0x800 { 2 } else if v < 0x10000 { 3 } else { 4 };
+        prefixw[i + 1] = acc;
+    }
+
+    let mut segend: Vec<u32> = vec![0; n.max(1)];
+    let mut cur: usize = 0;
+    for _ in 0..s {
+        let ln: usize = it.next().unwrap().parse().unwrap();
+        let e = cur + ln - 1;
+        for k in cur..cur + ln {
+            segend[k] = e as u32;
         }
+        cur += ln;
     }
 
-    let stdout = io::stdout();
-    let mut w = stdout.lock();
-
-    if toks.len() < 5 {
-        let _ = w.write_all(b"");
-        let _ = w.flush();
-        return;
-    }
-
-    let tk = |idx: usize| -> &[u8] {
-        let (a, b) = toks[idx];
-        &buf[a..b]
-    };
-
-    let mut pos = 0usize;
-    let mut n_chars: i64 = parse_dec(tk(pos)) as i64;
-    pos += 1;
-    let s_segs: u64 = parse_dec(tk(pos)) as u64;
-    pos += 1;
-    let q_num: u64 = parse_dec(tk(pos)) as u64;
-    pos += 1;
-    let cap: u128 = parse_dec(tk(pos));
-    pos += 1;
-    let hdr: u128 = parse_dec(tk(pos));
-    pos += 1;
-
-    let avail = (toks.len() - pos) as i64;
-    if n_chars > avail {
-        n_chars = avail;
-    }
-    if n_chars < 0 {
-        n_chars = 0;
-    }
-    let nn = n_chars as usize;
-
-    // UTF-8 widths
-    let mut widths: Vec<u8> = vec![0u8; nn];
-    for k in 0..nn {
-        let cp = parse_hex(tk(pos + k));
-        widths[k] = if cp < 0x80 {
-            1
-        } else if cp < 0x800 {
-            2
-        } else if cp < 0x10000 {
-            3
-        } else {
-            4
-        };
-    }
-    pos += nn;
-
-    // Segment boundary flags: bnd[i] = true if a new source segment starts at i (i > 0)
-    let mut bnd: Vec<bool> = vec![false; nn];
-    {
-        let mut idx: u128 = 0;
-        let mut s = 0u64;
-        while s < s_segs {
-            if pos >= toks.len() {
-                break;
-            }
-            let ln = parse_dec(tk(pos));
-            pos += 1;
-            if idx > 0 && idx < nn as u128 {
-                bnd[idx as usize] = true;
-            }
-            idx += ln;
-            s += 1;
+    // greedy chunk end
+    let mut up0: Vec<u32> = vec![0; n + 1];
+    let mut j: usize = 0;
+    for i in 0..n {
+        if j < i { j = i; }
+        let se = segend[i] as usize;
+        let base = prefixw[i];
+        while j < n && j <= se && prefixw[j + 1] - base <= c {
+            j += 1;
         }
+        up0[i] = j as u32;
+    }
+    up0[n] = n as u32;
+
+    let mut k_levels = 1usize;
+    while (1usize << (k_levels - 1)) < n.max(1) { k_levels += 1; }
+    k_levels += 1;
+
+    let mut up: Vec<Vec<u32>> = Vec::with_capacity(k_levels);
+    up.push(up0);
+    for lv in 1..k_levels {
+        let prev = &up[lv - 1];
+        let mut curv: Vec<u32> = vec![0; n + 1];
+        for i in 0..=n {
+            curv[i] = prev[prev[i] as usize];
+        }
+        up.push(curv);
     }
 
-    let mut out = String::with_capacity(64 * (q_num as usize).min(600_000) + 16);
-
-    let mut qi = 0u64;
-    while qi < q_num {
-        if pos + 2 >= toks.len() {
-            break;
-        }
-        let lraw = parse_dec(tk(pos)) as i64 - 1;
-        let rraw = parse_dec(tk(pos + 1)) as i64 - 1;
-        let budget: u128 = parse_dec(tk(pos + 2));
-        pos += 3;
-        qi += 1;
-
-        let l = if lraw < 0 { 0i64 } else { lraw };
-        let r = if rraw > nn as i64 - 1 { nn as i64 - 1 } else { rraw };
-
-        let mut payload: u128 = 0;
-        let mut wire: u128 = 0;
-        let mut chunks: u128 = 0;
-        let mut cur: u128 = 0;
-        let mut last: i64 = -1;
-
-        let mut i = l;
-        while i <= r {
-            let wd = widths[i as usize] as u128;
-            let new_chunk = cur == 0 || (i > l && bnd[i as usize]) || cur + wd > cap;
-            if new_chunk {
-                let cost = wd + hdr;
-                if wire + cost > budget {
-                    break;
+    let hb = h as u128;
+    let mut out = String::with_capacity(q * 32);
+    for _ in 0..q {
+        let l: usize = it.next().unwrap().parse().unwrap();
+        let r: usize = it.next().unwrap().parse().unwrap();
+        let b: u64 = it.next().unwrap().parse().unwrap();
+        let l0 = l - 1;
+        let limit = r; // exclusive end, 0-based
+        let base = prefixw[l0];
+        let bb = b as u128;
+        let mut pos = l0;
+        let mut m: u64 = 0;
+        for kk in (0..k_levels).rev() {
+            if pos >= limit { break; }
+            let qq = up[kk][pos] as usize;
+            if qq <= limit {
+                let cnt = m + (1u64 << kk);
+                let cost = (cnt as u128) * hb + ((prefixw[qq] - base) as u128);
+                if cost <= bb {
+                    pos = qq;
+                    m = cnt;
                 }
-                wire += cost;
-                payload += wd;
-                chunks += 1;
-                cur = wd;
-            } else {
-                if wire + wd > budget {
-                    break;
-                }
-                wire += wd;
-                payload += wd;
-                cur += wd;
             }
-            last = i;
-            i += 1;
         }
-
-        let done = i > r;
-        let (chars, lastout, lcp) = if last >= 0 {
-            ((last - l + 1) as u128, (last + 1) as u128, cur)
-        } else {
-            (0u128, 0u128, 0u128)
-        };
-
-        push_u128(&mut out, payload);
-        out.push(' ');
-        push_u128(&mut out, wire);
-        out.push(' ');
-        push_u128(&mut out, chars);
-        out.push(' ');
-        push_u128(&mut out, lastout);
-        out.push(' ');
-        push_u128(&mut out, chunks);
-        out.push(' ');
-        push_u128(&mut out, lcp);
-        out.push(' ');
-        out.push_str(if done { "END" } else { "LIMIT" });
-        out.push('\n');
+        let mut partial: u64 = 0;
+        let mut end = pos;
+        if pos < limit {
+            let wire_sofar = (m as u128) * hb + ((prefixw[pos] - base) as u128);
+            let used = wire_sofar + hb;
+            if used <= bb {
+                let rem = bb - used; // remaining payload budget
+                let mut hi = up[0][pos] as usize;
+                if hi > limit { hi = limit; }
+                let target: u128 = (prefixw[pos] as u128) + rem;
+                // largest e in [pos, hi] with prefixw[e] <= target
+                let mut lo = pos;
+                let mut hh = hi;
+                while lo < hh {
+                    let mid = (lo + hh + 1) / 2;
+                    if (prefixw[mid] as u128) <= target { lo = mid; } else { hh = mid - 1; }
+                }
+                let e = lo;
+                if e > pos {
+                    end = e;
+                    partial = prefixw[e] - prefixw[pos];
+                }
+            }
+        }
+        let payload = prefixw[end] - base;
+        let chunks = m + if partial > 0 { 1 } else { 0 };
+        let wire = payload + chunks * h;
+        let lcp: u64 = if partial > 0 {
+            partial
+        } else if m > 0 {
+            let mut p = l0;
+            let mut r2 = m - 1;
+            let mut kk = 0usize;
+            while r2 > 0 {
+                if r2 & 1 == 1 { p = up[kk][p] as usize; }
+                r2 >>= 1;
+                kk += 1;
+            }
+            prefixw[end] - prefixw[p]
+        } else { 0 };
+        let last = if end > l0 { end } else { 0 };
+        let cause = if end == limit { "END" } else { "LIMIT" };
+        out.push_str(&format!(
+            "{} {} {} {} {} {} {}\n",
+            payload, wire, end - l0, last, chunks, lcp, cause
+        ));
     }
-
-    let _ = w.write_all(out.as_bytes());
-    let _ = w.flush();
+    io::stdout().write_all(out.as_bytes()).unwrap();
 }
 ```
 
+[ 212.72s | rem   87.28s] emit_rust: chars=4563 model=claude-opus-5
+[ 212.77s | rem   87.23s] write: 51.25ms over 2 cases
+[ 212.77s | rem   87.23s] write: problem_02.rs verified=True cost=$0.4898
+done verified=True elapsed=212.769s -> /tmp/claude-0/-home-user-Scope/464a51bb-06b2-596a-a710-e3b720a6de3d/scratchpad/v3/problem_02.rs

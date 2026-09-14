@@ -14,6 +14,8 @@ from typing import Any
 
 from . import config
 from .analyzer import Analysis
+from .models import chat, choose_tier, reply_json
+from .planner import Plan
 
 
 @dataclass
@@ -166,6 +168,84 @@ def build_tests(analysis: Analysis, problem: dict[str, Any]) -> list[dict[str, A
     if analysis.huge_bounds:
         tests.append({"name": "trap_no_huge_loop", "kind": "static_trap"})
     return tests
+
+
+# `expected` is whatever the entrypoint returns, so it stays untyped; the CLI
+# still guarantees the envelope, which prompted JSON alone does not.
+TESTGEN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tests": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "args": {"type": "array"},
+                    "stdin": {"type": "string"},
+                    "expected": {},
+                },
+                "required": ["name", "expected"],
+            },
+        }
+    },
+    "required": ["tests"],
+}
+
+
+def propose_model_tests(
+    analysis: Analysis, plan: Plan | None, remaining_s: float
+) -> list[dict[str, Any]]:
+    """Extra cases written by the same model that writes the code.
+
+    Their expected values are guesses, so a mismatch here is soft: it can never
+    fail a solution the spec cases accept.
+    """
+    if remaining_s < config.TESTGEN_MIN_S or plan is None:
+        return []
+    tier = choose_tier("tests", analysis.difficulty, remaining_s)
+    reply = chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Invent 2 or 3 tiny unit tests from the problem statement. "
+                    "Each test must include a concrete expected value you can "
+                    "derive by hand from the wording. JSON only: "
+                    '{"tests":[{"name":"...","args":[...],"stdin":null,"expected":...}]}'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"entrypoint={analysis.proto_entrypoint} io={analysis.io_mode}\n"
+                    f"traps={plan.traps_to_handle}\nideas={plan.test_ideas}\n\n"
+                    f"{analysis.statement[:2800]}"
+                ),
+            },
+        ],
+        tier=tier,
+        remaining_s=remaining_s,
+        json_mode=True,
+        json_schema=TESTGEN_SCHEMA,
+        fallback_text="",
+    )
+    data = reply_json(reply)
+    out = []
+    for i, raw in enumerate(data.get("tests") or []):
+        if not isinstance(raw, dict) or "expected" not in raw:
+            continue
+        item = {
+            "name": str(raw.get("name") or f"model_{i}"),
+            "kind": "model",
+            "expected": raw.get("expected"),
+        }
+        if analysis.io_mode == "stdin":
+            item["stdin"] = str(raw.get("stdin") or "")
+        else:
+            item["args"] = raw.get("args") or []
+        out.append(item)
+    return out[:3]
 
 
 def _static_trap_ok(code: str) -> tuple[bool, str]:
@@ -368,12 +448,15 @@ def run_tests(code: str, analysis: Analysis, tests: list[dict[str, Any]]) -> Ver
             hints.append(f"{result['name']}: {result['detail']}")
 
     passed = sum(1 for case in cases if case["ok"])
-    failed = [case for case in cases if not case["ok"]]
-    # Every case is now spec-derived and local, so every failure is real.
-    all_ok = not failed
+    # A spec case is derived from the wording and is authoritative. A case the
+    # model invented may carry a wrong expected value, so it cannot fail a run.
+    hard_fail = [c for c in cases if not c["ok"] and c.get("kind") != "model"]
+    all_ok = not hard_fail
     summary = f"{passed}/{len(cases)} local tests passed" if cases else "syntax+entrypoint ok"
-    if failed:
-        summary += f" ({len(failed)} failed: {', '.join(c['name'] for c in failed[:3])})"
+    if hard_fail:
+        summary += f" ({len(hard_fail)} failed: {', '.join(c['name'] for c in hard_fail[:3])})"
+    elif any(not c["ok"] for c in cases):
+        summary += " (model-written mismatches only)"
     if not cases:
         all_ok = True
     return VerifyReport(
@@ -393,7 +476,7 @@ def verify(code: str, analysis: Analysis, tests: list[dict[str, Any]]) -> Verify
 def benchmark(code: str, analysis: Analysis, tests: list[dict[str, Any]]) -> dict[str, Any]:
     import time
 
-    timed = [case for case in tests if case.get("kind") in {"spec", "smoke"}][:2]
+    timed = [case for case in tests if case.get("kind") in {"spec", "model", "smoke"}][:2]
     if not timed:
         return {"used": False, "reason": "no runnable case"}
     start = time.monotonic()

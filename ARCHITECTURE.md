@@ -13,7 +13,7 @@ problem JSON
   → analyze (local)
   → plan (Claude Haiku 4.5 at low effort, or skipped entirely)
   ├─ generate (Claude Sonnet 5, Opus 5 on hard problems) ─┐   in parallel
-  └─ tests (local spec cases, no model)                    ┘
+  └─ tests (local spec cases + Opus-written cases)         ┘
   → verify (local)
        ├─ fail + time left → repair (Claude, escalating tier) → verify
        ├─ Rust target → emit fn main() (Claude)
@@ -39,12 +39,14 @@ Every tier is a Claude model and the only transport is the Claude Code CLI.
 | Job | Tier | Model | `--effort` |
 |---|---|---|---|
 | Plan (optional) | cheap | `claude-haiku-4-5-20251001` | low |
-| Python / Rust generation, repair | normal | `claude-opus-5` | medium |
-| Hard problems, escalated repair | strong | `claude-opus-5` | high |
-| Trap extraction, **test cases**, stub check, verify, benchmark, disk write | — | local, no model | — |
+| Test cases, generation, Rust emission | normal / strong | `claude-opus-5` | medium / high |
+| Repair | — | `CLAUDE_REPAIR_MODEL` (Opus, or `claude-fable-5-1`) | medium |
+| Trap extraction, stub check, verify, benchmark, disk write | — | local, no model | — |
 
-Four model calls exist in the pipeline and no others: plan, generate, repair,
-emit_rust. Everything else is Python.
+Five model calls exist in the pipeline and no others: plan, test cases,
+generate, repair, emit_rust. Everything else is Python. Verification always
+executes locally - `agent/verifier.py` runs each case in a subprocess on this
+machine; no model ever decides whether a candidate passed.
 
 Plan is the only stage allowed a cheap model, and only at low effort; every stage that writes code runs Opus. On failure `agent/models.py` walks the chain Opus → `claude-sonnet-5` → local fallback text, and hands the rest of the chain to `claude --fallback-model` so plain overload is retried inside a single invocation.
 
@@ -77,7 +79,7 @@ returned a usable plan for $0.068 while the prompt-only run returned text this r
 could not parse, for $0.098, in the same wall clock. Both JSON stages therefore ship
 a schema, and `chat()` still falls back to prompted JSON if the CLI ever rejects one.
 
-**Timeouts.** Every call is bounded by `min(CLI_TIMEOUT_S, remaining - RESERVE_S)`. Under `CLI_MIN_CALL_S` the stage does not call a model at all and takes its local fallback, so the writer always keeps its reserve. A CLI turn costs process start-up plus thinking time, so `LATE_PHASE_S` (70s) and `MIN_REPAIR_S` (60s) were raised from their HTTP-era values: each one now has to cover a whole round trip, not a fast API call. There is no spend cap - the deadline is the only limit.
+**Timeouts.** Every call is bounded by `min(CLI_TIMEOUT_S, remaining - RESERVE_S)`, and the plan call additionally by `PLAN_MAX_S` (75s) because it is optional and must not eat the budget generation and repair need. While a fallback rung remains an attempt gets only `CLI_FIRST_ATTEMPT_SHARE` (0.7) of what is left, and a timeout drops straight to the next model rather than retrying the same one - a retry of a model that just timed out only consumes the window the next model needs. Under `CLI_MIN_CALL_S` the stage does not call a model at all and takes its local fallback, so the writer always keeps its reserve. A CLI turn costs process start-up plus thinking time, so `LATE_PHASE_S` (70s) and `MIN_REPAIR_S` (60s) were raised from their HTTP-era values: each one now has to cover a whole round trip, not a fast API call. There is no spend cap - the deadline is the only limit.
 
 ## Parallelism
 
@@ -154,7 +156,7 @@ deadline.
 
 **Generate** (`agent/generator.py`). Python stdlib function named by the spec. Rust samples first get a Python `solve(stdin) -> str` prototype, then a `fn main()` program.
 
-**Tests** (`agent/verifier.py` + `GenerateTestsTool`). Local only, no model call: spec cases with expected values derived from the statement (empty, invalid, implicit error, …), a stdin smoke case for Rust, and a static-trap case when the analyzer found huge bounds. Runs concurrently with generation.
+**Tests** (`agent/verifier.py` + `GenerateTestsTool`). Spec cases with expected values derived from the statement (empty, invalid, implicit error, …), a stdin smoke case for Rust, and a static-trap case when the analyzer found huge bounds - all local. Above `TESTGEN_MIN_S` it also asks Opus for 2-3 more. Those are guesses, so a mismatch on one is **soft** and can never fail a solution the spec cases accept. Runs concurrently with generation.
 
 **Verify**. Syntax, required entrypoint, stub/echo rejection, subprocess run with timeout, expected-value compare. Static ban on `range(10**18)`-style loops.
 
@@ -176,6 +178,8 @@ the reason one is absent. Two layers:
   included. Anything the guards cannot absorb still writes the in-flight
   candidate from the shared `ToolContext` plus a `.meta.json` carrying
   `salvaged: true`, the error, the traceback and the events so far.
+
+Every run appends its whole workflow to `hone.log`: the stage timeline, each model call with its argv and both prompts and the reply, the test cases the run produced, and the verifier's per-case verdict.
 
 `solve.py` prints the traceback for a genuine crash rather than one bare line,
 and its exit code says what happened: `0` all verified, `1` written but
