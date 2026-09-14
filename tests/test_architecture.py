@@ -120,17 +120,72 @@ class ArchitectureTests(unittest.TestCase):
     def test_every_tier_is_a_claude_model_on_the_cli(self) -> None:
         for tier in ("cheap", "normal", "strong"):
             self.assertEqual(provider_for(tier), "claude-cli")
+            self.assertTrue(models.model_for(tier).startswith("claude-"))
         self.assertEqual(CHEAP_PROVIDER, "claude-cli")
-        self.assertIn("haiku", CHEAP_MODEL)
-        self.assertIn("sonnet", NORMAL_MODEL)
-        self.assertIn("opus", STRONG_MODEL)
+        # Every stage runs Opus by default.
+        for model in (CHEAP_MODEL, NORMAL_MODEL, STRONG_MODEL):
+            self.assertIn("opus", model)
 
-    def test_model_chain_starts_at_the_tier_and_degrades(self) -> None:
-        chain = model_chain("strong")
-        self.assertEqual(chain[0], STRONG_MODEL)
-        self.assertEqual(chain[-1], CHEAP_MODEL)
-        self.assertEqual(len(chain), len(set(chain)))
-        self.assertEqual(model_chain("cheap")[0], CHEAP_MODEL)
+    def test_every_chain_keeps_a_rung_below_the_primary(self) -> None:
+        """A one-model chain sends a timeout straight to the local skeleton."""
+        for tier in ("cheap", "normal", "strong"):
+            chain = model_chain(tier)
+            self.assertEqual(chain[0], models.model_for(tier))
+            self.assertGreaterEqual(len(chain), 2, f"{tier} has no fallback rung")
+            self.assertEqual(len(chain), len(set(chain)))
+            self.assertNotEqual(chain[-1], chain[0])
+
+    def test_first_model_cannot_spend_the_whole_budget(self) -> None:
+        """The window each attempt gets, so a fallback still has a clock."""
+        windows = []
+        real_invoke = models._invoke
+        models._invoke = lambda argv, prompt, timeout: (windows.append(timeout), (None, "timeout"))[1]
+        real_available = models.cli_available
+        models.cli_available = lambda *a, **k: True
+        real_attempts = config.CLI_ATTEMPTS
+        config.CLI_ATTEMPTS = 1
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                chat([{"role": "user", "content": "hi"}], tier="strong",
+                     timeout_s=200.0, fallback_text="local")
+        finally:
+            models._invoke = real_invoke
+            models.cli_available = real_available
+            config.CLI_ATTEMPTS = real_attempts
+            reset_usage()
+        self.assertGreaterEqual(len(windows), 2, windows)
+        # the first model gets a share, never the lot
+        self.assertLess(windows[0], 200.0)
+        self.assertAlmostEqual(windows[0], 200.0 * config.CLI_FIRST_ATTEMPT_SHARE, delta=1.0)
+        # and something is left for the next one
+        self.assertGreater(windows[1], config.CLI_MIN_CALL_S)
+
+    def test_prompt_log_records_argv_and_both_prompts(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prompts.log"
+            config.PROMPT_LOG = str(path)
+            try:
+                models._log_call(
+                    ["claude", "--model", "claude-opus-5", "--effort", "high"],
+                    "SYSTEM TEXT", "USER TEXT",
+                    {"result": "REPLY TEXT", "total_cost_usd": 0.25}, "", 1.5,
+                )
+            finally:
+                config.PROMPT_LOG = ""
+            written = path.read_text(encoding="utf-8")
+        for fragment in ("claude-opus-5", "high", "SYSTEM TEXT", "USER TEXT",
+                         "REPLY TEXT", "$0.2500"):
+            self.assertIn(fragment, written)
+
+    def test_prompt_log_off_by_default_and_never_raises(self) -> None:
+        self.assertEqual(config.PROMPT_LOG, "")
+        config.PROMPT_LOG = "/nonexistent-dir/cannot/write.log"
+        try:
+            models._log_call(["claude"], "s", "u", None, "boom", 0.1)  # must not raise
+        finally:
+            config.PROMPT_LOG = ""
 
     def test_effort_steps_down_near_the_deadline(self) -> None:
         self.assertEqual(effort_for("strong", 300), "high")

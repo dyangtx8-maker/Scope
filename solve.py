@@ -104,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--log-prompts",
+        metavar="PATH",
+        default="",
+        help="Append every CLI call - argv, system prompt, user prompt, reply - to PATH",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Probe the Claude CLI once to confirm it is installed and authenticated",
@@ -114,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory for .py and .meta.json files",
     )
     args = parser.parse_args(argv)
+
+    if args.log_prompts:
+        config.PROMPT_LOG = args.log_prompts
+        print(f"logging every model call to {args.log_prompts}", flush=True)
 
     if args.models:
         print(_routing())

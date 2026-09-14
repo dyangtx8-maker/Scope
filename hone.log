@@ -274,13 +274,15 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ FALLBACK_PROVIDER = PROVIDER
   │ 
   │ # Plan / adversarial tests.
-  │ CHEAP_MODEL = setting("CLAUDE_CHEAP_MODEL", "claude-haiku-4-5-20251001")
+  │ CHEAP_MODEL = setting("CLAUDE_CHEAP_MODEL", "claude-opus-5")
   │ # Python / Rust generation and repair.
-  │ NORMAL_MODEL = setting("CLAUDE_NORMAL_MODEL", "claude-sonnet-5")
+  │ NORMAL_MODEL = setting("CLAUDE_NORMAL_MODEL", "claude-opus-5")
   │ # Hard problems and escalated repairs.
   │ STRONG_MODEL = setting("CLAUDE_STRONG_MODEL", "claude-opus-5")
-  │ # Handed to `claude --fallback-model` when the requested model is overloaded.
-  │ FALLBACK_MODEL = setting("CLAUDE_FALLBACK_MODEL", NORMAL_MODEL)
+  │ # The emergency rung. Every stage runs Opus, but a chain of one model means a
+  │ # timeout goes straight to the local skeleton - which is how problem_04 ended
+  │ # up with a NotImplementedError stub. Keep one cheaper, faster model behind it.
+  │ FALLBACK_MODEL = setting("CLAUDE_FALLBACK_MODEL", "claude-sonnet-5")
   │ 
   │ # `claude --effort` replaces the old provider-specific reasoning_effort knob.
   │ EFFORT_BY_TIER = {"cheap": "low", "normal": "medium", "strong": "high"}
@@ -289,9 +291,13 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ # the deadline.
   │ EFFORT_DOWNGRADE_S = 150.0
   │ 
-  │ CLI_TIMEOUT_S = _float("CLAUDE_CLI_TIMEOUT_S", "120")
+  │ CLI_TIMEOUT_S = _float("CLAUDE_CLI_TIMEOUT_S", "240")
   │ CLI_MIN_CALL_S = _float("CLAUDE_CLI_MIN_CALL_S", "20")
   │ CLI_ATTEMPTS = _int("CLAUDE_CLI_ATTEMPTS", "2")
+  │ # Fraction of the remaining budget one attempt may spend while another model is
+  │ # still available. Without it the first model consumes the whole pool on a
+  │ # timeout and the fallback never gets a usable window.
+  │ CLI_FIRST_ATTEMPT_SHARE = _float("CLAUDE_CLI_FIRST_ATTEMPT_SHARE", "0.6")
   │ # Ignore CLAUDE.md, skills, plugins, hooks and MCP servers so a developer's
   │ # local Claude Code setup cannot change what this agent generates.
   │ CLI_SAFE_MODE = _flag("CLAUDE_CLI_SAFE_MODE", True)
@@ -313,6 +319,9 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │ # plan call takes back to generation and repair. The analyzer still supplies
   │ # the signature, return hint and trap list either way.
   │ PLAN_LLM = _flag("CLAUDE_PLAN_LLM", True)
+  │ # Append the exact argv, system prompt, user prompt and reply of every CLI call
+  │ # to this path. Empty disables it. solve.py --log-prompts PATH sets it too.
+  │ PROMPT_LOG = setting("CLAUDE_PROMPT_LOG", "")
   │ 
   │ # Spend guardrails handed to `claude --max-budget-usd`. They replace the old
   │ # max_tokens caps: with the CLI the useful bound is money, not tokens. Set a
@@ -461,7 +470,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - routing ····························································
 
-  ┌─ agent/models.py:120  (model_for)
+  ┌─ agent/models.py:121  (model_for)
   │ def model_for(tier: str) -> str:
   │     if tier == "cheap":
   │         return config.CHEAP_MODEL
@@ -470,12 +479,12 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return config.NORMAL_MODEL
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:128  (provider_for)
+  ┌─ agent/models.py:129  (provider_for)
   │ def provider_for(tier: str) -> str:  # noqa: ARG001 - one provider, kept for meta
   │     return config.PROVIDER
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:132  (model_chain)
+  ┌─ agent/models.py:133  (model_chain)
   │ def model_chain(tier: str) -> list[str]:
   │     """Requested model first, then cheaper survivors, without duplicates."""
   │     chain: list[str] = []
@@ -485,7 +494,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return chain
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:141  (effort_for)
+  ┌─ agent/models.py:142  (effort_for)
   │ def effort_for(tier: str, remaining_s: float = 0.0) -> str:
   │     """`claude --effort` for a tier, stepped down when the clock is short."""
   │     effort = config.EFFORT_BY_TIER.get(tier, "low")
@@ -495,7 +504,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return effort
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:150  (choose_tier)
+  ┌─ agent/models.py:151  (choose_tier)
   │ def choose_tier(stage: str, difficulty: str, remaining_s: float, repair_attempt: int = 0) -> str:
   │     """Cost-aware routing. Codegen never uses the cheap tier."""
   │     if stage in {"plan", "tests"}:
@@ -511,7 +520,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return "cheap"
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:165  (call_timeout)
+  ┌─ agent/models.py:166  (call_timeout)
   │ def call_timeout(remaining_s: float) -> float:
   │     """How long one CLI call may run without eating the write reserve."""
   │     usable = float(remaining_s or 0.0) - config.RESERVE_S
@@ -522,7 +531,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - building the command line ··········································
 
-  ┌─ agent/models.py:201  (bin_candidates)
+  ┌─ agent/models.py:202  (bin_candidates)
   │ def bin_candidates(name: str, windows: bool = os.name == "nt") -> list[str]:
   │     """Names to look for on PATH, most launchable first.
   │ 
@@ -535,7 +544,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return [name + ext for ext in (".cmd", ".exe", ".bat")] + [name]
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:213  (cli_path)
+  ┌─ agent/models.py:214  (cli_path)
   │ def cli_path(refresh: bool = False) -> str:
   │     """Absolute path of the Claude binary, resolved once, or "" if missing.
   │ 
@@ -553,7 +562,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return _CLI_PATH
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:276  (build_argv)
+  ┌─ agent/models.py:277  (build_argv)
   │ def build_argv(
   │     *,
   │     model: str,
@@ -604,7 +613,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return argv
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:258  (_split_messages)
+  ┌─ agent/models.py:259  (_split_messages)
   │ def _split_messages(messages: list[dict[str, str]]) -> tuple[str, str]:
   │     """Collapse OpenAI-style messages into (system prompt, user prompt)."""
   │     system_parts: list[str] = []
@@ -625,7 +634,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - running it and reading the reply ···································
 
-  ┌─ agent/models.py:363  (_invoke)
+  ┌─ agent/models.py:409  (_invoke)
   │ def _invoke(argv: list[str], prompt: str, timeout_s: float) -> tuple[Optional[dict[str, Any]], str]:
   │     try:
   │         process = subprocess.Popen(
@@ -669,7 +678,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return payload, ""
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:406  (_kill)
+  ┌─ agent/models.py:452  (_kill)
   │ def _kill(process: subprocess.Popen) -> None:
   │     # killpg takes the whole tree with it, but it only exists on POSIX.
   │     try:
@@ -688,7 +697,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         pass
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:326  (parse_result)
+  ┌─ agent/models.py:327  (parse_result)
   │ def parse_result(stdout: str) -> Optional[dict[str, Any]]:
   │     """Pull the result object out of CLI stdout, ignoring any noise lines."""
   │     found: Optional[dict[str, Any]] = None
@@ -711,7 +720,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return payload if isinstance(payload, dict) else None
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:348  (payload_error)
+  ┌─ agent/models.py:349  (payload_error)
   │ def payload_error(payload: dict[str, Any]) -> str:
   │     """Empty string when the CLI really did answer."""
   │     if payload.get("is_error"):
@@ -727,7 +736,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     return ""
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:424  (_sum_model_usage)
+  ┌─ agent/models.py:470  (_sum_model_usage)
   │ def _sum_model_usage(payload: dict[str, Any]) -> dict[str, int]:
   │     totals = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
   │     for entry in (payload.get("modelUsage") or {}).values():
@@ -748,7 +757,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │     }
   └────────────────────────────────────────────────────────────
 
-  ┌─ agent/models.py:444  (_reply_from_payload)
+  ┌─ agent/models.py:490  (_reply_from_payload)
   │ def _reply_from_payload(payload: dict[str, Any], requested: str, tier: str) -> ModelReply:
   │     used = list((payload.get("modelUsage") or {}).keys())
   │     structured = payload.get("structured_output")
@@ -777,7 +786,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· CODE - the retry/fallback loop ············································
 
-  ┌─ agent/models.py:483  (chat)
+  ┌─ agent/models.py:529  (chat)
   │ def chat(
   │     messages: list[dict[str, str]],
   │     *,
@@ -818,6 +827,13 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │             left = total_s - (time.monotonic() - started)
   │             if left < config.CLI_MIN_CALL_S:
   │                 return _local_reply(tier, fallback_text, "; ".join(errors[-2:]) or "out of time")
+  │             # Leave the next model a usable window. Without this the first model
+  │             # spends the whole pool on a timeout and every fallback dies on the
+  │             # clock too, which is how a run ends up with a local skeleton.
+  │             window = left
+  │             if index + 1 < len(chain):
+  │                 window = max(config.CLI_MIN_CALL_S, left * config.CLI_FIRST_ATTEMPT_SHARE)
+  │             window = min(left, window)
   │             session_id = str(uuid.uuid4())
   │             argv = build_argv(
   │                 model=model,
@@ -830,7 +846,9 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │                 session_id=session_id,
   │                 resumable=keep,
   │             )
-  │             payload, error = _invoke(argv, user, left)
+  │             call_started = time.monotonic()
+  │             payload, error = _invoke(argv, user, window)
+  │             _log_call(argv, system, user, payload, error, time.monotonic() - call_started)
   │             if payload is not None:
   │                 reply = _reply_from_payload(payload, model, tier)
   │                 if not error and not reply.text.strip():
@@ -865,7 +883,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· UNIT TESTS ································································
 
-  12 unit test(s) in tests/test_architecture.py exercise this stage:
+  13 unit test(s) in tests/test_architecture.py exercise this stage:
 
   ┌─ test_call_timeout_protects_the_write_reserve
   │     def test_call_timeout_protects_the_write_reserve(self) -> None:
@@ -956,13 +974,42 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   │         self.assertEqual(effort_for("cheap", 10), "low")
   └────────────────────────────────────────────────────────────
 
-  ┌─ test_model_chain_starts_at_the_tier_and_degrades
-  │     def test_model_chain_starts_at_the_tier_and_degrades(self) -> None:
-  │         chain = model_chain("strong")
-  │         self.assertEqual(chain[0], STRONG_MODEL)
-  │         self.assertEqual(chain[-1], CHEAP_MODEL)
-  │         self.assertEqual(len(chain), len(set(chain)))
-  │         self.assertEqual(model_chain("cheap")[0], CHEAP_MODEL)
+  ┌─ test_every_chain_keeps_a_rung_below_the_primary
+  │     def test_every_chain_keeps_a_rung_below_the_primary(self) -> None:
+  │         """A one-model chain sends a timeout straight to the local skeleton."""
+  │         for tier in ("cheap", "normal", "strong"):
+  │             chain = model_chain(tier)
+  │             self.assertEqual(chain[0], models.model_for(tier))
+  │             self.assertGreaterEqual(len(chain), 2, f"{tier} has no fallback rung")
+  │             self.assertEqual(len(chain), len(set(chain)))
+  │             self.assertNotEqual(chain[-1], chain[0])
+  └────────────────────────────────────────────────────────────
+
+  ┌─ test_first_model_cannot_spend_the_whole_budget
+  │     def test_first_model_cannot_spend_the_whole_budget(self) -> None:
+  │         """The window each attempt gets, so a fallback still has a clock."""
+  │         windows = []
+  │         real_invoke = models._invoke
+  │         models._invoke = lambda argv, prompt, timeout: (windows.append(timeout), (None, "timeout"))[1]
+  │         real_available = models.cli_available
+  │         models.cli_available = lambda *a, **k: True
+  │         real_attempts = config.CLI_ATTEMPTS
+  │         config.CLI_ATTEMPTS = 1
+  │         try:
+  │             with contextlib.redirect_stderr(io.StringIO()):
+  │                 chat([{"role": "user", "content": "hi"}], tier="strong",
+  │                      timeout_s=200.0, fallback_text="local")
+  │         finally:
+  │             models._invoke = real_invoke
+  │             models.cli_available = real_available
+  │             config.CLI_ATTEMPTS = real_attempts
+  │             reset_usage()
+  │         self.assertGreaterEqual(len(windows), 2, windows)
+  │         # the first model gets a share, never the lot
+  │         self.assertLess(windows[0], 200.0)
+  │         self.assertAlmostEqual(windows[0], 200.0 * config.CLI_FIRST_ATTEMPT_SHARE, delta=1.0)
+  │         # and something is left for the next one
+  │         self.assertGreater(windows[1], config.CLI_MIN_CALL_S)
   └────────────────────────────────────────────────────────────
 
   ┌─ test_parse_result_skips_noise_lines
@@ -1646,9 +1693,9 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· PROMPT ····································································
 
-  tier cheap | model claude-haiku-4-5-20251001 | --effort low | budget $0.50 | resumes=False
-  at 300s remaining the call is capped at 120s
-  fallback chain: claude-haiku-4-5-20251001 -> claude-sonnet-5 -> local fallback text
+  tier cheap | model claude-opus-5 | --effort low | budget $0.50 | resumes=False
+  at 300s remaining the call is capped at 240s
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> local fallback text
 
 --- EXACT argv handed to subprocess.Popen -------------------------------------
   [
@@ -1657,7 +1704,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     "--output-format",
     "json",
     "--model",
-    "claude-haiku-4-5-20251001",
+    "claude-opus-5",
     "--tools",
     "",
     "--permission-prompts",
@@ -1919,8 +1966,8 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 ·· PROMPT - python target ····················································
 
   tier strong | model claude-opus-5 | --effort high | budget $2.00 | resumes=False
-  at 180s remaining the call is capped at 120s
-  fallback chain: claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+  at 180s remaining the call is capped at 160s
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> local fallback text
 
 --- EXACT argv handed to subprocess.Popen -------------------------------------
   [
@@ -1941,7 +1988,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     "--system-prompt",
     "You write Python 3.9 standard-library solutions. No I/O, no network, no third-party imports, no global mutable state. Do not mutate caller-owned arguments. Never loop 10**9 or 10**18 times and never allocate a grid that large. Do not write placeholders, echo stubs, or NotImplementedError. Implement the real rules, even if only a correct small-input version. Return only one markdown python code block. The required entrypoint is `simulate_writes`.",
     "--fallback-model",
-    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "claude-sonnet-5",
     "--max-budget-usd",
     "2.00",
     "--session-id",
@@ -1986,8 +2033,8 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 ·· PROMPT - rust target (a python solve(stdin) prototype comes first) ········
 
   tier strong | model claude-opus-5 | --effort high | budget $2.00 | resumes=False
-  at 180s remaining the call is capped at 120s
-  fallback chain: claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+  at 180s remaining the call is capped at 160s
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> local fallback text
 
 --- EXACT argv handed to subprocess.Popen -------------------------------------
   [
@@ -2008,7 +2055,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     "--system-prompt",
     "You write Python 3.9 standard-library solutions. No I/O, no network, no third-party imports, no global mutable state. Do not mutate caller-owned arguments. Never loop 10**9 or 10**18 times and never allocate a grid that large. Do not write placeholders, echo stubs, or NotImplementedError. Implement the real rules, even if only a correct small-input version. Return only one markdown python code block. The required entrypoint is `solve`. Implement `def solve(stdin: str) -> str` that reads the full stdin text and returns the full stdout text. This is a prototype for a Rust program.",
     "--fallback-model",
-    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "claude-sonnet-5",
     "--max-budget-usd",
     "2.00",
     "--session-id",
@@ -2621,9 +2668,9 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
 ·· PROMPT - adversarial cases (mismatches here are SOFT, they cannot fail a run) 
 
-  tier cheap | model claude-haiku-4-5-20251001 | --effort low | budget $0.50 | resumes=False
-  at 180s remaining the call is capped at 120s
-  fallback chain: claude-haiku-4-5-20251001 -> claude-sonnet-5 -> local fallback text
+  tier cheap | model claude-opus-5 | --effort low | budget $0.50 | resumes=False
+  at 180s remaining the call is capped at 160s
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> local fallback text
 
 --- EXACT argv handed to subprocess.Popen -------------------------------------
   [
@@ -2632,7 +2679,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     "--output-format",
     "json",
     "--model",
-    "claude-haiku-4-5-20251001",
+    "claude-opus-5",
     "--tools",
     "",
     "--permission-prompts",
@@ -3348,7 +3395,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
   tier strong | model claude-opus-5 | --effort medium | budget $2.00 | resumes=True
   at 120s remaining the call is capped at 100s
-  fallback chain: claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> local fallback text
 
 --- EXACT argv handed to subprocess.Popen -------------------------------------
   [
@@ -3369,7 +3416,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     "--system-prompt",
     "You repair Python 3.9 stdlib solutions. Keep `def simulate_writes`. No I/O. No huge loops. No placeholders. Return one python markdown code block only.",
     "--fallback-model",
-    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "claude-sonnet-5",
     "--max-budget-usd",
     "2.00",
     "--resume",
@@ -3403,7 +3450,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
   tier strong | model claude-opus-5 | --effort medium | budget $2.00 | resumes=True
   at 120s remaining the call is capped at 100s
-  fallback chain: claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> local fallback text
 
 --- EXACT argv handed to subprocess.Popen -------------------------------------
   [
@@ -3424,7 +3471,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     "--system-prompt",
     "You repair a complete Rust stdin/stdout program. Keep fn main(). Standard library only, no unsafe. Do not emit an echo stub. Return one rust markdown block.",
     "--fallback-model",
-    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "claude-sonnet-5",
     "--max-budget-usd",
     "2.00",
     "--resume",
@@ -3517,8 +3564,8 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 ·· PROMPT ····································································
 
   tier strong | model claude-opus-5 | --effort high | budget $2.00 | resumes=True
-  at 150s remaining the call is capped at 120s
-  fallback chain: claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+  at 150s remaining the call is capped at 130s
+  fallback chain: claude-opus-5 -> claude-sonnet-5 -> local fallback text
 
 --- EXACT argv handed to subprocess.Popen -------------------------------------
   [
@@ -3539,7 +3586,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     "--system-prompt",
     "You write one complete Rust program with fn main(). Stdin/stdout only. Standard library only. No unsafe, no crates, no filesystem, no network, no nondeterminism. Never loop 10^18 times. Do not emit a stub that only echoes input. Return one markdown rust code block.",
     "--fallback-model",
-    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "claude-sonnet-5",
     "--max-budget-usd",
     "2.00",
     "--resume",
@@ -4453,10 +4500,10 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
 
   #  stage                 model                         effort   budget
   ------------------------------------------------------------------------
-  1  plan                  claude-haiku-4-5-20251001     low      $0.50
+  1  plan                  claude-opus-5                 low      $0.50
   2  generate:python       claude-opus-5                 high     $2.00
   3  generate:rust-proto   claude-opus-5                 high     $2.00
-  4  tests:adversarial     claude-haiku-4-5-20251001     low      $0.50
+  4  tests:adversarial     claude-opus-5                 low      $0.50
   5  repair:python         claude-opus-5                 medium   $2.00
   6  repair:rust           claude-opus-5                 medium   $2.00
   7  emit_rust             claude-opus-5                 high     $2.00
@@ -4464,7 +4511,7 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
   A python problem makes 3 calls (plan, tests, generate); a rust problem makes 4
   (plus emit_rust); each failed verify can add up to 3 more (repair).
 
-  36 unit tests total, all offline - no network, no CLI:
+  39 unit tests total, all offline - no network, no CLI:
     - test_a_bad_number_falls_back_instead_of_crashing
     - test_a_graph_failure_salvages_the_best_candidate
     - test_a_node_failure_still_writes_a_solution
@@ -4481,11 +4528,12 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     - test_effort_steps_down_near_the_deadline
     - test_env_file_survives_bom_and_codepage
     - test_env_file_values_drop_inline_comments
+    - test_every_chain_keeps_a_rung_below_the_primary
     - test_every_tier_is_a_claude_model_on_the_cli
     - test_exit_code_reports_a_run_that_wrote_nothing
     - test_extract_rust_fence
+    - test_first_model_cannot_spend_the_whole_budget
     - test_langgraph_compiles
-    - test_model_chain_starts_at_the_tier_and_degrades
     - test_only_sessions_we_minted_can_be_resumed
     - test_outcome_classifies_every_ending
     - test_parallel_mode_fans_generate_and_tests_out_of_plan
@@ -4493,6 +4541,8 @@ ChallengeBox agent - complete workflow: source, prompts, test cases
     - test_payload_error_catches_a_soft_api_failure
     - test_plan_llm_defaults_on_and_is_a_real_setting
     - test_plan_llm_off_skips_the_model_entirely
+    - test_prompt_log_off_by_default_and_never_raises
+    - test_prompt_log_records_argv_and_both_prompts
     - test_reply_reads_tokens_cost_and_structured_output
     - test_resume_forks_into_a_session_id_we_chose
     - test_routing_escalates_on_hard_repair

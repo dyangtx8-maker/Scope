@@ -140,13 +140,15 @@ STRONG_PROVIDER = PROVIDER
 FALLBACK_PROVIDER = PROVIDER
 
 # Plan / adversarial tests.
-CHEAP_MODEL = setting("CLAUDE_CHEAP_MODEL", "claude-haiku-4-5-20251001")
+CHEAP_MODEL = setting("CLAUDE_CHEAP_MODEL", "claude-opus-5")
 # Python / Rust generation and repair.
-NORMAL_MODEL = setting("CLAUDE_NORMAL_MODEL", "claude-sonnet-5")
+NORMAL_MODEL = setting("CLAUDE_NORMAL_MODEL", "claude-opus-5")
 # Hard problems and escalated repairs.
 STRONG_MODEL = setting("CLAUDE_STRONG_MODEL", "claude-opus-5")
-# Handed to `claude --fallback-model` when the requested model is overloaded.
-FALLBACK_MODEL = setting("CLAUDE_FALLBACK_MODEL", NORMAL_MODEL)
+# The emergency rung. Every stage runs Opus, but a chain of one model means a
+# timeout goes straight to the local skeleton - which is how problem_04 ended
+# up with a NotImplementedError stub. Keep one cheaper, faster model behind it.
+FALLBACK_MODEL = setting("CLAUDE_FALLBACK_MODEL", "claude-sonnet-5")
 
 # `claude --effort` replaces the old provider-specific reasoning_effort knob.
 EFFORT_BY_TIER = {"cheap": "low", "normal": "medium", "strong": "high"}
@@ -155,9 +157,13 @@ EFFORT_LADDER = ["low", "medium", "high"]
 # the deadline.
 EFFORT_DOWNGRADE_S = 150.0
 
-CLI_TIMEOUT_S = _float("CLAUDE_CLI_TIMEOUT_S", "120")
+CLI_TIMEOUT_S = _float("CLAUDE_CLI_TIMEOUT_S", "240")
 CLI_MIN_CALL_S = _float("CLAUDE_CLI_MIN_CALL_S", "20")
 CLI_ATTEMPTS = _int("CLAUDE_CLI_ATTEMPTS", "2")
+# Fraction of the remaining budget one attempt may spend while another model is
+# still available. Without it the first model consumes the whole pool on a
+# timeout and the fallback never gets a usable window.
+CLI_FIRST_ATTEMPT_SHARE = _float("CLAUDE_CLI_FIRST_ATTEMPT_SHARE", "0.6")
 # Ignore CLAUDE.md, skills, plugins, hooks and MCP servers so a developer's
 # local Claude Code setup cannot change what this agent generates.
 CLI_SAFE_MODE = _flag("CLAUDE_CLI_SAFE_MODE", True)
@@ -179,6 +185,9 @@ PARALLEL_STAGES = _flag("CLAUDE_PARALLEL_STAGES", True)
 # plan call takes back to generation and repair. The analyzer still supplies
 # the signature, return hint and trap list either way.
 PLAN_LLM = _flag("CLAUDE_PLAN_LLM", True)
+# Append the exact argv, system prompt, user prompt and reply of every CLI call
+# to this path. Empty disables it. solve.py --log-prompts PATH sets it too.
+PROMPT_LOG = setting("CLAUDE_PROMPT_LOG", "")
 
 # Spend guardrails handed to `claude --max-budget-usd`. They replace the old
 # max_tokens caps: with the CLI the useful bound is money, not tokens. Set a

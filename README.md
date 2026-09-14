@@ -112,9 +112,10 @@ this repo.
 
 | Job | Tier | Model |
 |---|---|---|
-| Plan, adversarial test ideas | cheap | `claude-haiku-4-5-20251001` |
-| Python / Rust generation, repair | normal | `claude-sonnet-5` |
+| Plan, adversarial test ideas | cheap | `claude-opus-5` |
+| Python / Rust generation, repair | normal | `claude-opus-5` |
 | Hard problems, escalated repair | strong | `claude-opus-5` |
+| Emergency rung when a call times out | fallback | `claude-sonnet-5` |
 | Trap extraction, spec tests, stub check, benchmark, disk write | — | local, no model |
 
 The CLI, not this code, owns authentication, overload fallback
@@ -132,6 +133,10 @@ python3 solve.py --check                   # one tiny call proves auth works
 python3 tests/test_architecture.py         # no network, no CLI needed
 python3 solve.py problems/problem_01.json
 ```
+
+`solve.py --log-prompts PATH` appends every model call - the argv, the system
+prompt, the user prompt and the reply - to PATH, so a run records exactly what
+was sent.
 
 `CLAUDE_PLAN_LLM=0` skips the planning model call and uses the local heuristic
 plan, freeing the 70-130s a plan call costs for generation and repair.

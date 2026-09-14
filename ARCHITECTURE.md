@@ -38,12 +38,14 @@ Every tier is a Claude model and the only transport is the Claude Code CLI.
 
 | Job | Tier | Model | `--effort` |
 |---|---|---|---|
-| Plan, adversarial test ideas | cheap | `claude-haiku-4-5-20251001` | low |
-| Python / Rust generation, repair | normal | `claude-sonnet-5` | medium |
+| Plan, adversarial test ideas | cheap | `claude-opus-5` | low |
+| Python / Rust generation, repair | normal | `claude-opus-5` | medium |
 | Hard problems, escalated repair | strong | `claude-opus-5` | high |
 | Trap extraction, spec tests, stub check, benchmark, disk write | — | local, no model | — |
 
-Codegen never runs on the cheap tier. On failure `agent/models.py` walks the chain requested model → `claude-sonnet-5` → `claude-haiku-4-5` → local fallback text, and hands the rest of the chain to `claude --fallback-model` so plain overload is retried inside a single invocation.
+Every stage runs Opus; the tiers now differ only by `--effort`. On failure `agent/models.py` walks the chain Opus → `claude-sonnet-5` → local fallback text, and hands the rest of the chain to `claude --fallback-model` so plain overload is retried inside a single invocation.
+
+**One attempt never spends the whole budget.** While a fallback rung remains, an attempt is capped at `CLI_FIRST_ATTEMPT_SHARE` (0.6) of what is left. Without that, a timeout on the first model consumes the pool and every fallback dies on the clock too: `problem_04` burned 120s on Opus, 120s on Sonnet, and wrote a `NotImplementedError` stub at 254s. With the share and a 240s ceiling the same problem verifies 5/5 in 128s.
 
 No key lives in this repo. The CLI authenticates itself (`claude login`, or `ANTHROPIC_API_KEY` / Bedrock / Vertex in the environment or `.env`); `.env` values starting with `ANTHROPIC_`, `AWS_` or `CLAUDE_CODE_USE_` are passed through to the child process and never logged.
 

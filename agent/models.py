@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -360,6 +361,51 @@ def payload_error(payload: dict[str, Any]) -> str:
     return ""
 
 
+_LOG_LOCK = threading.Lock()
+
+
+def _log_call(
+    argv: list[str],
+    system: str,
+    user: str,
+    payload: Optional[dict[str, Any]],
+    error: str,
+    elapsed_s: float,
+) -> None:
+    """Append one call - argv, both prompts, outcome - to CLAUDE_PROMPT_LOG."""
+    path = config.PROMPT_LOG
+    if not path:
+        return
+    model = argv[argv.index("--model") + 1] if "--model" in argv else "?"
+    effort = argv[argv.index("--effort") + 1] if "--effort" in argv else "?"
+    if error:
+        outcome = f"FAILED after {elapsed_s:.1f}s - {error}"
+        result = ""
+    else:
+        cost = float((payload or {}).get("total_cost_usd") or 0.0)
+        result = str((payload or {}).get("result") or "")
+        outcome = f"ok in {elapsed_s:.1f}s - ${cost:.4f}, {len(result)} chars"
+    lines = [
+        "=" * 78,
+        f"CALL  model={model}  effort={effort}  {outcome}",
+        "=" * 78,
+        "--- argv ---",
+        json.dumps(argv, indent=2),
+        "--- system prompt ---",
+        system,
+        "--- user prompt (child stdin) ---",
+        user,
+        "--- reply ---",
+        result or "(none)",
+        "",
+    ]
+    try:
+        with _LOG_LOCK, open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError:
+        pass  # logging must never take a run down
+
+
 def _invoke(argv: list[str], prompt: str, timeout_s: float) -> tuple[Optional[dict[str, Any]], str]:
     try:
         process = subprocess.Popen(
@@ -520,6 +566,13 @@ def chat(
             left = total_s - (time.monotonic() - started)
             if left < config.CLI_MIN_CALL_S:
                 return _local_reply(tier, fallback_text, "; ".join(errors[-2:]) or "out of time")
+            # Leave the next model a usable window. Without this the first model
+            # spends the whole pool on a timeout and every fallback dies on the
+            # clock too, which is how a run ends up with a local skeleton.
+            window = left
+            if index + 1 < len(chain):
+                window = max(config.CLI_MIN_CALL_S, left * config.CLI_FIRST_ATTEMPT_SHARE)
+            window = min(left, window)
             session_id = str(uuid.uuid4())
             argv = build_argv(
                 model=model,
@@ -532,7 +585,9 @@ def chat(
                 session_id=session_id,
                 resumable=keep,
             )
-            payload, error = _invoke(argv, user, left)
+            call_started = time.monotonic()
+            payload, error = _invoke(argv, user, window)
+            _log_call(argv, system, user, payload, error, time.monotonic() - call_started)
             if payload is not None:
                 reply = _reply_from_payload(payload, model, tier)
                 if not error and not reply.text.strip():
