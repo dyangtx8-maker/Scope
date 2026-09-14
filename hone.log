@@ -1,0 +1,1194 @@
+ChallengeBox agent - complete workflow trace
+generated from the live code; every prompt is captured at the call site
+
+runtime          : claude-cli
+phase            : 4
+binary           : /opt/node22/bin/claude
+python problem   : problems/problem_01.json  (simulate_writes)
+rust problem     : problems/problem_02.json  (main)
+
+==============================================================================
+0. MODEL ROUTING - which model and effort each stage gets
+==============================================================================
+
+  tier    model                         effort    used by
+  ----------------------------------------------------------------------------
+  cheap   claude-haiku-4-5-20251001     low       plan, adversarial tests
+  normal  claude-sonnet-5               medium    generate, repair
+  strong  claude-opus-5                 high      generate/repair on hard
+
+  effort steps down one notch below 150s remaining
+  every call capped at min(CLI_TIMEOUT_S=120s, remaining - RESERVE_S=20s)
+  under CLI_MIN_CALL_S=20s a stage skips the model and takes its local fallback
+
+  choose_tier() decision table, difficulty=hard:
+    stage        remaining  tier    model                       effort
+    plan               300  cheap   claude-haiku-4-5-20251001   low
+    tests              180  cheap   claude-haiku-4-5-20251001   low
+    generate           180  strong  claude-opus-5               high
+    generate           140  strong  claude-opus-5               medium
+    generate            90  normal  claude-sonnet-5             low
+    repair             120  strong  claude-opus-5               medium
+    repair              70  normal  claude-sonnet-5             low
+
+==============================================================================
+1. ANALYZE - local, no model, ~20ms
+==============================================================================
+
+  code: agent/analyzer.py :: analyze_problem()
+  tools: ReadProblemTool -> AnalyzeConstraintsTool (agent/tools.py)
+  no prompt, no cost. Everything below is regex/keyword extraction.
+
+--- Analysis produced for problem_01 ------------------------------------------
+  {
+    "problem_id": "1ba0d34fae43f1d26c14f3091598291f0ca9d6ab3f88232d15a3322c017042c3",
+    "source_language": "python",
+    "target_language": "python",
+    "entrypoint": "simulate_writes",
+    "signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)",
+    "io_mode": "function",
+    "statement": "Simulate a congestion-aware virtual-adapter write worker with a shared spin-credit reservoir.\n\nDefine `simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)`.\n\n`lengths` is a list of packet lengths. A packet is valid exactly when its length is in `[1, 65535]`. Invalid packets make no attempt and change no shared state.\n\n`outcomes` is a run-length encoded chronological list of `(kind, count)` pairs. `kind` is `\"ok\"`, `\"full\"`, or `\"error\"`, and `count` is positive. Every write attempt consumes one outcome. After all runs are exhausted, every later attempt implicitly returns `\"error\"`.\n\nThe worker has a congestion level, initially zero and always in `[0, level_cap]`, and a spin-credit balance, initially `initial_credits` and always in `[0, credit_cap]`. Valid packets are processed in order:\n\n* `\"ok\"` sends the packet, decreases the level by one without going below zero, then adds the packet's length to the credit balance, capped at `credit_cap`.\n* `\"error\"` fails the packet and resets the level to zero. Credits are unchanged.\n* `\"full\"` raises the level by one, capped at `level_cap`. Let `old_level` be the level before this increase and l",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "Constraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`."
+    ],
+    "huge_bounds": [
+      "10**18",
+      "10**30",
+      "200,000"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: implicit",
+      "wording: exactly",
+      "wording: without going below"
+    ],
+    "algorithmic_traps": [
+      "algorithm: run-length"
+    ],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "return_hint": "dict",
+    "difficulty": "hard",
+    "proto_entrypoint": "simulate_writes",
+    "proto_signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)"
+  }
+
+--- Analysis produced for problem_02 (rust) -----------------------------------
+  {
+    "problem_id": "1c182498c9c78c41c5b3b3e7cd6f51db7343e42da6950fd990380ebb61899db0",
+    "source_language": "rust",
+    "target_language": "rust",
+    "entrypoint": "main",
+    "signature": "fn main()",
+    "io_mode": "stdin",
+    "deadline_s": 300.0,
+    "public_examples": [],
+    "constraints": [
+      "* A chunk contains at most `C` UTF-8 payload bytes and never splits a character.",
+      "Constraints:",
+      "`1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`."
+    ],
+    "huge_bounds": [
+      "10^18"
+    ],
+    "materialization_risks": [],
+    "wording_traps": [
+      "wording: exactly",
+      "wording: one-based"
+    ],
+    "algorithmic_traps": [],
+    "time_memory_risks": [
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work"
+    ],
+    "return_hint": "stdout tokens",
+    "difficulty": "hard",
+    "proto_entrypoint": "solve",
+    "proto_signature": "solve(stdin: str) -> str"
+  }
+
+==============================================================================
+2. PLAN - cheap tier
+==============================================================================
+
+  code: agent/planner.py :: plan_solution()
+  skipped entirely when CLAUDE_PLAN_LLM=0 or under 25s remaining -> heuristic_plan()
+
+  tier            : cheap
+  model           : claude-haiku-4-5-20251001
+  --effort        : low
+  clock at entry  : 300s remaining -> call capped at 120s
+  --max-budget-usd: 0.50
+  resumes session : False
+  fallback chain  : claude-haiku-4-5-20251001 -> claude-sonnet-5 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-haiku-4-5-20251001",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "low",
+    "--safe-mode",
+    "--system-prompt",
+    "You plan solutions for hard algorithmic problems. Reply with a JSON object only. Do not write code. Huge numeric bounds must not be materialized or looped. If target_language is rust, plan a Python prototype first and a later Rust translation.",
+    "--fallback-model",
+    "claude-sonnet-5",
+    "--max-budget-usd",
+    "0.50",
+    "--json-schema",
+    "{\"type\":\"object\",\"properties\":{\"approach\":{\"type\":\"string\"},\"data_structures\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"complexity_target\":{\"type\":\"string\"},\"traps_to_handle\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"python_signature\":{\"type\":\"string\"},\"return_shape\":{\"type\":\"string\"},\"test_ideas\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"approach\",\"traps_to_handle\",\"test_ideas\"]}",
+    "--session-id",
+    "<fresh uuid4 per call>",
+    "--no-session-persistence"
+  ]
+
+--- --json-schema (the CLI validates the reply against this) ------------------
+  {
+    "type": "object",
+    "properties": {
+      "approach": {
+        "type": "string"
+      },
+      "data_structures": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "complexity_target": {
+        "type": "string"
+      },
+      "traps_to_handle": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "python_signature": {
+        "type": "string"
+      },
+      "return_shape": {
+        "type": "string"
+      },
+      "test_ideas": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "approach",
+      "traps_to_handle",
+      "test_ideas"
+    ]
+  }
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  You plan solutions for hard algorithmic problems. Reply with a JSON object only. Do not write code. Huge numeric bounds must not be materialized or looped. If target_language is rust, plan a Python prototype first and a later Rust translation.
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  Create a concise plan with keys: approach, data_structures (array), complexity_target, traps_to_handle (array), python_signature, return_shape, test_ideas (array).
+  
+  {'target_language': 'python', 'entrypoint': 'simulate_writes', 'proto_signature': 'simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)', 'io_mode': 'function', 'return_hint': 'dict', 'difficulty': 'hard', 'huge_bounds': ['10**18', '10**30', '200,000'], 'traps': {'materialization': [], 'wording': ['wording: implicit', 'wording: exactly', 'wording: without going below'], 'algorithmic': ['algorithm: run-length'], 'time_memory': ['numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work', 'cannot allocate by coordinate or iterate a bound']}, 'constraints': ['Constraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`.'], 'statement': 'Simulate a congestion-aware virtual-adapter write worker with a shared spin-credit reservoir.\n\nDefine `simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)`.\n\n`lengths` is a list of packet lengths. A packet is valid exactly when its length is in `[1, 65535]`. Invalid packets make no attempt and change no shared state.\n\n`outcomes` is a run-length encoded chronological list of `(kind, count)` pairs. `kind` is `"ok"`, `"full"`, or `"error"`, and `count` is positive. Every write attempt consumes one outcome. After all runs are exhausted, every later attempt implicitly returns `"error"`.\n\nThe worker has a congestion level, initially zero and always in `[0, level_cap]`, and a spin-credit balance, initially `initial_credits` and always in `[0, credit_cap]`. Valid packets are processed in order:\n\n* `"ok"` sends the packet, decreases the level by one without going below zero, then adds the packet\'s length to the credit balance, capped at `credit_cap`.\n* `"error"` fails the packet and resets the level to zero. Credits are unchanged.\n* `"full"` raises the level by one, capped at `level_cap`. Let `old_level` be the level before this increase and let `cost = min(2**old_level, spin_limit)`. Another attempt is scheduled only if fewer than `max_retries` retries have already been scheduled for this packet and the current credit balance is at least `cost`. Scheduling it counts one retry, deducts exactly `cost` credits, performs `cost` spin iterations, and performs exactly one scheduler yield if `2**old_level > spin_limit`. If either condition fails, the packet is dropped immediately; that final `"full"` causes no spin, yield, or credit deduction.\n\nCongestion and credits persist between packets. A retry is counted when its next attempt is scheduled. All arithmetic is exact.\n\nReturn a dictionary containing:\n\n* `"packets"`: one `(status, retries, spins, yields)` tuple per input length. Status is `"INVALID"`, `"SENT"`, `"ERROR"`, or `"DROPPED"`.\n* `"telemetry"`: a dictionary with `sent`, `dropped`, `errors`, `invalid`, `attempts`, `spins`, `yields`, `final_level`, and `final_credits`. The first four are packet counts. `attempts` includes attempts receiving implicit errors.\n\nConstraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`.'}
+
+--- heuristic_plan() - what you get instead when the call is skipped or fails -
+  {
+    "approach": "Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.",
+    "data_structures": [
+      "dicts/lists sized by input",
+      "avoid dense grids"
+    ],
+    "complexity_target": "near-linear in the given input length",
+    "traps_to_handle": [
+      "algorithm: run-length",
+      "wording: implicit",
+      "wording: exactly",
+      "wording: without going below",
+      "numeric bounds too large for naive loops or arrays",
+      "n up to ~1e5\u20135e5; need near-linear work",
+      "cannot allocate by coordinate or iterate a bound"
+    ],
+    "python_signature": "simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)",
+    "return_shape": "dict",
+    "test_ideas": [
+      "smallest legal input with a known expected value from the spec",
+      "invalid / implicit-error / boundary wording trap",
+      "a case that would explode if a huge bound is looped"
+    ],
+    "model": "local-heuristic",
+    "fallback": true,
+    "emit_rust": false,
+    "cost_usd": 0.0
+  }
+
+==============================================================================
+3. GENERATE (python) - strong tier on hard problems
+==============================================================================
+
+  code: agent/generator.py :: generate_python()
+
+  tier            : strong
+  model           : claude-opus-5
+  --effort        : high
+  clock at entry  : 180s remaining -> call capped at 120s
+  --max-budget-usd: 2.00
+  resumes session : False
+  fallback chain  : claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-opus-5",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "high",
+    "--safe-mode",
+    "--system-prompt",
+    "You write Python 3.9 standard-library solutions. No I/O, no network, no third-party imports, no global mutable state. Do not mutate caller-owned arguments. Never loop 10**9 or 10**18 times and never allocate a grid that large. Do not write placeholders, echo stubs, or NotImplementedError. Implement the real rules, even if only a correct small-input version. Return only one markdown python code block. The required entrypoint is `simulate_writes`.",
+    "--fallback-model",
+    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "--max-budget-usd",
+    "2.00",
+    "--session-id",
+    "<fresh uuid4 per call>"
+  ]
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  You write Python 3.9 standard-library solutions. No I/O, no network, no third-party imports, no global mutable state. Do not mutate caller-owned arguments. Never loop 10**9 or 10**18 times and never allocate a grid that large. Do not write placeholders, echo stubs, or NotImplementedError. Implement the real rules, even if only a correct small-input version. Return only one markdown python code block. The required entrypoint is `simulate_writes`.
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  SIGNATURE: simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)
+  RETURN: dict
+  APPROACH: Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.
+  DATA STRUCTURES: ['dicts/lists sized by input', 'avoid dense grids']
+  COMPLEXITY: near-linear in the given input length
+  TRAPS: ['algorithm: run-length', 'wording: implicit', 'wording: exactly', 'wording: without going below', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work', 'cannot allocate by coordinate or iterate a bound']
+  
+  STATEMENT:
+  Simulate a congestion-aware virtual-adapter write worker with a shared spin-credit reservoir.
+  
+  Define `simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)`.
+  
+  `lengths` is a list of packet lengths. A packet is valid exactly when its length is in `[1, 65535]`. Invalid packets make no attempt and change no shared state.
+  
+  `outcomes` is a run-length encoded chronological list of `(kind, count)` pairs. `kind` is `"ok"`, `"full"`, or `"error"`, and `count` is positive. Every write attempt consumes one outcome. After all runs are exhausted, every later attempt implicitly returns `"error"`.
+  
+  The worker has a congestion level, initially zero and always in `[0, level_cap]`, and a spin-credit balance, initially `initial_credits` and always in `[0, credit_cap]`. Valid packets are processed in order:
+  
+  * `"ok"` sends the packet, decreases the level by one without going below zero, then adds the packet's length to the credit balance, capped at `credit_cap`.
+  * `"error"` fails the packet and resets the level to zero. Credits are unchanged.
+  * `"full"` raises the level by one, capped at `level_cap`. Let `old_level` be the level before this increase and let `cost = min(2**old_level, spin_limit)`. Another attempt is scheduled only if fewer than `max_retries` retries have already been scheduled for this packet and the current credit balance is at least `cost`. Scheduling it counts one retry, deducts exactly `cost` credits, performs `cost` spin iterations, and performs exactly one scheduler yield if `2**old_level > spin_limit`. If either condition fails, the packet is dropped immediately; that final `"full"` causes no spin, yield, or credit deduction.
+  
+  Congestion and credits persist between packets. A retry is counted when its next attempt is scheduled. All arithmetic is exact.
+  
+  Return a dictionary containing:
+  
+  * `"packets"`: one `(status, retries, spins, yields)` tuple per input length. Status is `"INVALID"`, `"SENT"`, `"ERROR"`, or `"DROPPED"`.
+  * `"telemetry"`: a dictionary with `sent`, `dropped`, `errors`, `invalid`, `attempts`, `spins`, `yields`, `final_level`, and `final_credits`. The first four are packet counts. `attempts` includes attempts receiving implicit errors.
+  
+  Constraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`.
+
+==============================================================================
+3b. GENERATE (rust prototype) - same stage, stdin/stdout variant
+==============================================================================
+
+  rust problems first get a Python `solve(stdin) -> str` prototype to verify
+
+  tier            : strong
+  model           : claude-opus-5
+  --effort        : high
+  clock at entry  : 180s remaining -> call capped at 120s
+  --max-budget-usd: 2.00
+  resumes session : False
+  fallback chain  : claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-opus-5",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "high",
+    "--safe-mode",
+    "--system-prompt",
+    "You write Python 3.9 standard-library solutions. No I/O, no network, no third-party imports, no global mutable state. Do not mutate caller-owned arguments. Never loop 10**9 or 10**18 times and never allocate a grid that large. Do not write placeholders, echo stubs, or NotImplementedError. Implement the real rules, even if only a correct small-input version. Return only one markdown python code block. The required entrypoint is `solve`. Implement `def solve(stdin: str) -> str` that reads the full stdin text and returns the full stdout text. This is a prototype for a Rust program.",
+    "--fallback-model",
+    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "--max-budget-usd",
+    "2.00",
+    "--session-id",
+    "<fresh uuid4 per call>"
+  ]
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  You write Python 3.9 standard-library solutions. No I/O, no network, no third-party imports, no global mutable state. Do not mutate caller-owned arguments. Never loop 10**9 or 10**18 times and never allocate a grid that large. Do not write placeholders, echo stubs, or NotImplementedError. Implement the real rules, even if only a correct small-input version. Return only one markdown python code block. The required entrypoint is `solve`. Implement `def solve(stdin: str) -> str` that reads the full stdin text and returns the full stdout text. This is a prototype for a Rust program.
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  SIGNATURE: solve(stdin: str) -> str
+  RETURN: stdout tokens
+  APPROACH: Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never loop a 1e18 bound.
+  DATA STRUCTURES: ['dicts/lists sized by input', 'avoid dense grids']
+  COMPLEXITY: near-linear in the given input length
+  TRAPS: ['wording: exactly', 'wording: one-based', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work']
+  
+  STATEMENT:
+  Subject: Framed delivery records for segmented text
+  
+  Text arrives in source segments and is transmitted in byte-limited chunks. Each nonempty chunk also adds a framing header, so the transmission budget depends on where chunk boundaries occur.
+  
+  The text consists of Unicode scalar values. Under UTF-8, a value uses 1 byte for U+0000..U+007F, 2 for U+0080..U+07FF, 3 for U+0800..U+FFFF, and 4 otherwise. Surrogates are invalid.
+  
+  For each request, start a new transmission with no open chunk and process a consecutive character range from left to right:
+  
+  * A chunk contains at most `C` UTF-8 payload bytes and never splits a character.
+  * A chunk cannot cross a source-segment boundary. Reaching that boundary closes it.
+  * Every nonempty chunk contributes exactly `H` additional wire bytes for its header. Headers do not count toward `C`.
+  * The request budget `B` limits total wire bytes: payload bytes plus headers.
+  * Before sending a character, include its payload width and, if it would begin a new chunk, one header. If this would exceed `B`, stop before that character. A header is never sent without at least one character.
+  * Completing the requested range has cause `END`; every earlier stop has cause `LIMIT`.
+  * The final nonempty chunk closes when transmission stops, even if it is not full and no segment boundary was reached.
+  
+  Input:
+  
+  * First line: `N S Q C H`.
+  * Next `N` tokens: the characters in order, written as hexadecimal Unicode scalar values without a `U+` prefix.
+  * Next `S` positive integers: source-segment lengths whose sum is `N`.
+  * Next `Q` requests: `L R B`, with one-based positions and `1 <= L <= R <= N`.
+  
+  Constraints:
+  
+  `1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`.
+  
+  For each request, print seven fields:
+  
+  `payload_bytes wire_bytes characters last chunks last_chunk_payload_bytes cause`
+  
+  `payload_bytes` excludes headers. `wire_bytes` includes them. `last` is the final transmitted one-based position, or `0` if none. `chunks` counts nonempty chunks. `last_chunk_payload_bytes` is the payload size of the final chunk, or `0` if none.
+  
+  Provide one complete Rust program containing `fn main()`. Use only the standard library, with no filesystem, network, external crates, unsafe code, or nondeterminism. Output is compared by splitting on ASCII whitespace bytes `09` through `0D` and `20`, then comparing tokens exactly.
+
+==============================================================================
+4. TESTS - local spec cases + cheap-tier adversarial cases
+==============================================================================
+
+  code: agent/verifier.py :: build_tests() + propose_adversarial_tests()
+  gate: GenerateTestsTool needs >=25s; adversarial needs >=90s
+
+  4a. LOCAL SPEC CASES - hand-derived from the statement, no model involved.
+      These are the cases that actually decide verified=True/False;
+      adversarial mismatches are soft and cannot fail a run.
+
+--- spec_cases(problem_01) - executable expectations from the wording ---------
+  [
+    {
+      "name": "spec_empty",
+      "args": [
+        [],
+        [],
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "expected": {
+        "packets": [],
+        "telemetry": {
+          "sent": 0,
+          "dropped": 0,
+          "errors": 0,
+          "invalid": 0,
+          "attempts": 0,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 0
+        }
+      },
+      "kind": "spec"
+    },
+    {
+      "name": "spec_invalid",
+      "args": [
+        [
+          0,
+          65536
+        ],
+        [],
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "expected": {
+        "packets": [
+          [
+            "INVALID",
+            0,
+            0,
+            0
+          ],
+          [
+            "INVALID",
+            0,
+            0,
+            0
+          ]
+        ],
+        "telemetry": {
+          "sent": 0,
+          "dropped": 0,
+          "errors": 0,
+          "invalid": 2,
+          "attempts": 0,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 0
+        }
+      },
+      "kind": "spec"
+    },
+    {
+      "name": "spec_implicit_error",
+      "args": [
+        [
+          5
+        ],
+        [],
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "expected": {
+        "packets": [
+          [
+            "ERROR",
+            0,
+            0,
+            0
+          ]
+        ],
+        "telemetry": {
+          "sent": 0,
+          "dropped": 0,
+          "errors": 1,
+          "invalid": 0,
+          "attempts": 1,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 0
+        }
+      },
+      "kind": "spec"
+    },
+    {
+      "name": "spec_one_ok",
+      "args": [
+        [
+          3
+        ],
+        [
+          [
+            "ok",
+            1
+          ]
+        ],
+        0,
+        0,
+        1,
+        0,
+        10
+      ],
+      "expected": {
+        "packets": [
+          [
+            "SENT",
+            0,
+            0,
+            0
+          ]
+        ],
+        "telemetry": {
+          "sent": 1,
+          "dropped": 0,
+          "errors": 0,
+          "invalid": 0,
+          "attempts": 1,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 3
+        }
+      },
+      "kind": "spec"
+    }
+  ]
+
+--- build_tests(problem_01) - the full list handed to the verifier ------------
+  [
+    {
+      "name": "spec_empty",
+      "args": [
+        [],
+        [],
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "expected": {
+        "packets": [],
+        "telemetry": {
+          "sent": 0,
+          "dropped": 0,
+          "errors": 0,
+          "invalid": 0,
+          "attempts": 0,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 0
+        }
+      },
+      "kind": "spec"
+    },
+    {
+      "name": "spec_invalid",
+      "args": [
+        [
+          0,
+          65536
+        ],
+        [],
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "expected": {
+        "packets": [
+          [
+            "INVALID",
+            0,
+            0,
+            0
+          ],
+          [
+            "INVALID",
+            0,
+            0,
+            0
+          ]
+        ],
+        "telemetry": {
+          "sent": 0,
+          "dropped": 0,
+          "errors": 0,
+          "invalid": 2,
+          "attempts": 0,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 0
+        }
+      },
+      "kind": "spec"
+    },
+    {
+      "name": "spec_implicit_error",
+      "args": [
+        [
+          5
+        ],
+        [],
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "expected": {
+        "packets": [
+          [
+            "ERROR",
+            0,
+            0,
+            0
+          ]
+        ],
+        "telemetry": {
+          "sent": 0,
+          "dropped": 0,
+          "errors": 1,
+          "invalid": 0,
+          "attempts": 1,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 0
+        }
+      },
+      "kind": "spec"
+    },
+    {
+      "name": "spec_one_ok",
+      "args": [
+        [
+          3
+        ],
+        [
+          [
+            "ok",
+            1
+          ]
+        ],
+        0,
+        0,
+        1,
+        0,
+        10
+      ],
+      "expected": {
+        "packets": [
+          [
+            "SENT",
+            0,
+            0,
+            0
+          ]
+        ],
+        "telemetry": {
+          "sent": 1,
+          "dropped": 0,
+          "errors": 0,
+          "invalid": 0,
+          "attempts": 1,
+          "spins": 0,
+          "yields": 0,
+          "final_level": 0,
+          "final_credits": 3
+        }
+      },
+      "kind": "spec"
+    },
+    {
+      "name": "trap_no_huge_loop",
+      "kind": "static_trap"
+    }
+  ]
+
+--- build_tests(problem_02, rust) - stdin smoke + static trap -----------------
+  [
+    {
+      "name": "empty_stdin",
+      "stdin": "",
+      "kind": "smoke",
+      "allow_empty": true
+    },
+    {
+      "name": "trap_no_huge_loop",
+      "kind": "static_trap"
+    }
+  ]
+
+  4b. ADVERSARIAL CASES - the cheap tier invents 2-3 more:
+
+  tier            : cheap
+  model           : claude-haiku-4-5-20251001
+  --effort        : low
+  clock at entry  : 180s remaining -> call capped at 120s
+  --max-budget-usd: 0.50
+  resumes session : False
+  fallback chain  : claude-haiku-4-5-20251001 -> claude-sonnet-5 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-haiku-4-5-20251001",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "low",
+    "--safe-mode",
+    "--system-prompt",
+    "Invent 2 or 3 tiny unit tests from the problem statement. Each test must include a concrete expected value you can derive by hand from the wording. JSON only: {\"tests\":[{\"name\":\"...\",\"args\":[...],\"stdin\":null,\"expected\":...}]}",
+    "--fallback-model",
+    "claude-sonnet-5",
+    "--max-budget-usd",
+    "0.50",
+    "--json-schema",
+    "{\"type\":\"object\",\"properties\":{\"tests\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"args\":{\"type\":\"array\"},\"stdin\":{\"type\":\"string\"},\"expected\":{}},\"required\":[\"name\",\"expected\"]}}},\"required\":[\"tests\"]}",
+    "--session-id",
+    "<fresh uuid4 per call>",
+    "--no-session-persistence"
+  ]
+
+--- --json-schema (the CLI validates the reply against this) ------------------
+  {
+    "type": "object",
+    "properties": {
+      "tests": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "args": {
+              "type": "array"
+            },
+            "stdin": {
+              "type": "string"
+            },
+            "expected": {}
+          },
+          "required": [
+            "name",
+            "expected"
+          ]
+        }
+      }
+    },
+    "required": [
+      "tests"
+    ]
+  }
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  Invent 2 or 3 tiny unit tests from the problem statement. Each test must include a concrete expected value you can derive by hand from the wording. JSON only: {"tests":[{"name":"...","args":[...],"stdin":null,"expected":...}]}
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  entrypoint=simulate_writes io=function
+  traps=['algorithm: run-length', 'wording: implicit', 'wording: exactly', 'wording: without going below', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work', 'cannot allocate by coordinate or iterate a bound']
+  ideas=['smallest legal input with a known expected value from the spec', 'invalid / implicit-error / boundary wording trap', 'a case that would explode if a huge bound is looped']
+  
+  Simulate a congestion-aware virtual-adapter write worker with a shared spin-credit reservoir.
+  
+  Define `simulate_writes(lengths, outcomes, max_retries, level_cap, spin_limit, initial_credits, credit_cap)`.
+  
+  `lengths` is a list of packet lengths. A packet is valid exactly when its length is in `[1, 65535]`. Invalid packets make no attempt and change no shared state.
+  
+  `outcomes` is a run-length encoded chronological list of `(kind, count)` pairs. `kind` is `"ok"`, `"full"`, or `"error"`, and `count` is positive. Every write attempt consumes one outcome. After all runs are exhausted, every later attempt implicitly returns `"error"`.
+  
+  The worker has a congestion level, initially zero and always in `[0, level_cap]`, and a spin-credit balance, initially `initial_credits` and always in `[0, credit_cap]`. Valid packets are processed in order:
+  
+  * `"ok"` sends the packet, decreases the level by one without going below zero, then adds the packet's length to the credit balance, capped at `credit_cap`.
+  * `"error"` fails the packet and resets the level to zero. Credits are unchanged.
+  * `"full"` raises the level by one, capped at `level_cap`. Let `old_level` be the level before this increase and let `cost = min(2**old_level, spin_limit)`. Another attempt is scheduled only if fewer than `max_retries` retries have already been scheduled for this packet and the current credit balance is at least `cost`. Scheduling it counts one retry, deducts exactly `cost` credits, performs `cost` spin iterations, and performs exactly one scheduler yield if `2**old_level > spin_limit`. If either condition fails, the packet is dropped immediately; that final `"full"` causes no spin, yield, or credit deduction.
+  
+  Congestion and credits persist between packets. A retry is counted when its next attempt is scheduled. All arithmetic is exact.
+  
+  Return a dictionary containing:
+  
+  * `"packets"`: one `(status, retries, spins, yields)` tuple per input length. Status is `"INVALID"`, `"SENT"`, `"ERROR"`, or `"DROPPED"`.
+  * `"telemetry"`: a dictionary with `sent`, `dropped`, `errors`, `invalid`, `attempts`, `spins`, `yields`, `final_level`, and `final_credits`. The first four are packet counts. `attempts` includes attempts receiving implicit errors.
+  
+  Constraints: at most 200,000 packets and 200,000 outcome runs; `0 <= max_retries <= 10**18`; `0 <= level_cap <= 60`; `1 <= spin_limit <= 10**18`; run counts are at most `10**18`; and `0 <= initial_credits <= credit_cap <= 10**30`.
+
+==============================================================================
+5. VERIFY - local, no model, subprocess-isolated
+==============================================================================
+
+  code: agent/verifier.py :: run_tests()
+  gauntlet, in order - each gate is cheaper than the next:
+    1. ast.parse(code)                     -> syntax
+    2. 'def <entrypoint>' present         -> simulate_writes
+    3. looks_like_stub()                   -> marker strings + echo heuristics
+    4. each case in a subprocess          -> 3.0s timeout each
+    5. static trap scan                    -> literal range(10**18)-style loops
+
+--- stub markers that get a candidate rejected outright -----------------------
+  NotImplementedError
+  Placeholder solution
+  Phase 1 Python stand-in
+  prototype not generated
+  generator fallback
+  current task is to provide a syntactically correct
+
+--- banned static patterns ----------------------------------------------------
+  range(10**18)
+  range(10 ** 18)
+  range(10**9)
+  range(10 ** 9)
+  range(max_retries)
+  range(spin_limit)
+  range(credit_cap)
+
+--- the runner executed per case (subprocess, fresh interpreter) --------------
+  
+  import importlib.util, json
+  spec = json.loads("{\"code_path\": \"<path to candidate>.py\", \"entrypoint\": \"simulate_writes\", \"io_mode\": \"function\", \"case\": {\"name\": \"spec_empty\", \"args\": [[], [], 0, 0, 1, 0, 0]}}")
+  mod_spec = importlib.util.spec_from_file_location("candidate", spec["code_path"])
+  mod = importlib.util.module_from_spec(mod_spec)
+  mod_spec.loader.exec_module(mod)
+  fn = getattr(mod, spec["entrypoint"], None)
+  if fn is None:
+      raise SystemExit("missing entrypoint " + spec["entrypoint"])
+  case = spec["case"]
+  if spec["io_mode"] == "stdin":
+      result = fn(case.get("stdin", ""))
+  else:
+      result = fn(*case.get("args", []))
+  
+  def default(o):
+      if isinstance(o, tuple):
+          return list(o)
+      raise TypeError(type(o).__name__)
+  print(json.dumps({"ok": True, "result": result, "result_type": type(result).__name__}, default=default))
+
+--- worked example - verify() on a stub candidate -----------------------------
+  {
+    "ok": false,
+    "summary": "stub marker: NotImplementedError",
+    "syntax_ok": true,
+    "entrypoint_ok": true,
+    "stub": true,
+    "cases": [],
+    "hints": [
+      "stub marker: NotImplementedError",
+      "Replace the stub with a real implementation of the stated rules."
+    ]
+  }
+
+==============================================================================
+6. REPAIR - escalating tier, resumes the generate session
+==============================================================================
+
+  code: agent/repair.py :: repair_solution()
+  reachable only when: report failed, attempts < 3,
+  remaining >= MIN_REPAIR_S(60s), and not late (>= LATE_PHASE_S 70s)
+  keep-best: a candidate scoring lower than the incumbent is thrown away
+
+  tier            : strong
+  model           : claude-opus-5
+  --effort        : medium
+  clock at entry  : 120s remaining -> call capped at 100s
+  --max-budget-usd: 2.00
+  resumes session : True
+  fallback chain  : claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-opus-5",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "medium",
+    "--safe-mode",
+    "--system-prompt",
+    "You repair Python 3.9 stdlib solutions. Keep `def simulate_writes`. No I/O. No huge loops. No placeholders. Return one python markdown code block only.",
+    "--fallback-model",
+    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "--max-budget-usd",
+    "2.00",
+    "--resume",
+    "<session-id of the generate call>",
+    "--fork-session",
+    "--system-prompt-snapshot",
+    "off",
+    "--session-id",
+    "<fresh uuid4 per call>"
+  ]
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  You repair Python 3.9 stdlib solutions. Keep `def simulate_writes`. No I/O. No huge loops. No placeholders. Return one python markdown code block only.
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  PLAN: Write a direct Python implementation of the stated rules. Never loop or allocate using a 1e9/1e18 bound; iterate input size only. Prefer maps, difference arrays, or lazy simulation.
+  FAILURES:
+  spec_empty: expected {'packets': [], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}} got {'packets': [], 'telemetry': {}}
+  spec_invalid: expected {'packets': [['INVALID', 0, 0, 0], ['INVALID', 0, 0, 0]], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 0, 'invalid': 2, 'attempts': 0, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}} got {'packets': [], 'telemetry': {}}
+  spec_implicit_error: expected {'packets': [['ERROR', 0, 0, 0]], 'telemetry': {'sent': 0, 'dropped': 0, 'errors': 1, 'invalid': 0, 'attempts': 1, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 0}} got {'packets': [], 'telemetry': {}}
+  spec_one_ok: expected {'packets': [['SENT', 0, 0, 0]], 'telemetry': {'sent': 1, 'dropped': 0, 'errors': 0, 'invalid': 0, 'attempts': 1, 'spins': 0, 'yields': 0, 'final_level': 0, 'final_credits': 3}} got {'packets': [], 'telemetry': {}}
+  
+  CURRENT CODE:
+  ```python
+  def simulate_writes(lengths, outcomes, a, b, c, d, e):
+      return {'packets': [], 'telemetry': {}}
+  
+  ```
+
+==============================================================================
+6b. REPAIR (rust variant)
+==============================================================================
+
+  tier            : strong
+  model           : claude-opus-5
+  --effort        : medium
+  clock at entry  : 120s remaining -> call capped at 100s
+  --max-budget-usd: 2.00
+  resumes session : True
+  fallback chain  : claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-opus-5",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "medium",
+    "--safe-mode",
+    "--system-prompt",
+    "You repair a complete Rust stdin/stdout program. Keep fn main(). Standard library only, no unsafe. Do not emit an echo stub. Return one rust markdown block.",
+    "--fallback-model",
+    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "--max-budget-usd",
+    "2.00",
+    "--resume",
+    "<session-id of the generate call>",
+    "--fork-session",
+    "--system-prompt-snapshot",
+    "off",
+    "--session-id",
+    "<fresh uuid4 per call>"
+  ]
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  You repair a complete Rust stdin/stdout program. Keep fn main(). Standard library only, no unsafe. Do not emit an echo stub. Return one rust markdown block.
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  PLAN: Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never loop a 1e18 bound.
+  FAILURES:
+  rust static ok
+  
+  CURRENT CODE:
+  ```rust
+  fn main() { println!(""); }
+  
+  ```
+
+==============================================================================
+7. EMIT RUST - translate the verified prototype into fn main()
+==============================================================================
+
+  code: agent/generator.py :: generate_rust()
+
+  tier            : strong
+  model           : claude-opus-5
+  --effort        : high
+  clock at entry  : 150s remaining -> call capped at 120s
+  --max-budget-usd: 2.00
+  resumes session : True
+  fallback chain  : claude-opus-5 -> claude-sonnet-5 -> claude-haiku-4-5-20251001 -> local fallback text
+
+--- EXACT argv handed to subprocess.Popen -------------------------------------
+  [
+    "/opt/node22/bin/claude",
+    "--print",
+    "--output-format",
+    "json",
+    "--model",
+    "claude-opus-5",
+    "--tools",
+    "",
+    "--permission-prompts",
+    "none",
+    "--strict-mcp-config",
+    "--effort",
+    "high",
+    "--safe-mode",
+    "--system-prompt",
+    "You write one complete Rust program with fn main(). Stdin/stdout only. Standard library only. No unsafe, no crates, no filesystem, no network, no nondeterminism. Never loop 10^18 times. Do not emit a stub that only echoes input. Return one markdown rust code block.",
+    "--fallback-model",
+    "claude-sonnet-5,claude-haiku-4-5-20251001",
+    "--max-budget-usd",
+    "2.00",
+    "--resume",
+    "<session-id of the generate call>",
+    "--fork-session",
+    "--system-prompt-snapshot",
+    "off",
+    "--session-id",
+    "<fresh uuid4 per call>"
+  ]
+
+--- SYSTEM PROMPT (--system-prompt) -------------------------------------------
+  You write one complete Rust program with fn main(). Stdin/stdout only. Standard library only. No unsafe, no crates, no filesystem, no network, no nondeterminism. Never loop 10^18 times. Do not emit a stub that only echoes input. Return one markdown rust code block.
+
+--- USER PROMPT (written to the child's stdin) --------------------------------
+  APPROACH: Prototype the stdin/stdout spec in Python as solve(stdin) -> str, verify tiny cases, then emit a complete Rust fn main() using only the standard library. Never loop a 1e18 bound.
+  TRAPS: ['wording: exactly', 'wording: one-based', 'numeric bounds too large for naive loops or arrays', 'n up to ~1e5–5e5; need near-linear work']
+  
+  STATEMENT:
+  Subject: Framed delivery records for segmented text
+  
+  Text arrives in source segments and is transmitted in byte-limited chunks. Each nonempty chunk also adds a framing header, so the transmission budget depends on where chunk boundaries occur.
+  
+  The text consists of Unicode scalar values. Under UTF-8, a value uses 1 byte for U+0000..U+007F, 2 for U+0080..U+07FF, 3 for U+0800..U+FFFF, and 4 otherwise. Surrogates are invalid.
+  
+  For each request, start a new transmission with no open chunk and process a consecutive character range from left to right:
+  
+  * A chunk contains at most `C` UTF-8 payload bytes and never splits a character.
+  * A chunk cannot cross a source-segment boundary. Reaching that boundary closes it.
+  * Every nonempty chunk contributes exactly `H` additional wire bytes for its header. Headers do not count toward `C`.
+  * The request budget `B` limits total wire bytes: payload bytes plus headers.
+  * Before sending a character, include its payload width and, if it would begin a new chunk, one header. If this would exceed `B`, stop before that character. A header is never sent without at least one character.
+  * Completing the requested range has cause `END`; every earlier stop has cause `LIMIT`.
+  * The final nonempty chunk closes when transmission stops, even if it is not full and no segment boundary was reached.
+  
+  Input:
+  
+  * First line: `N S Q C H`.
+  * Next `N` tokens: the characters in order, written as hexadecimal Unicode scalar values without a `U+` prefix.
+  * Next `S` positive integers: source-segment lengths whose sum is `N`.
+  * Next `Q` requests: `L R B`, with one-based positions and `1 <= L <= R <= N`.
+  
+  Constraints:
+  
+  `1 <= N,Q <= 500000`, `1 <= S <= N`, `4 <= C <= 10^18`, `0 <= H,B <= 10^18`. Every scalar is at most `10FFFF` and outside `D800..DFFF`.
+  
+  For each request, print seven fields:
+  
+  `payload_bytes wire_bytes characters last chunks last_chunk_payload_bytes cause`
+  
+  `payload_bytes` excludes headers. `wire_bytes` includes them. `last` is the final transmitted one-based position, or `0` if none. `chunks` counts nonempty chunks. `last_chunk_payload_bytes` is the payload size of the final chunk, or `0` if none.
+  
+  Provide one complete Rust program containing `fn main()`. Use only the standard library, with no filesystem, network, external crates, unsafe code, or nondeterminism. Output is compared by splitting on ASCII whitespace bytes `09` through `0D` and `20`, then comparing tokens exactly.
+  
+  VERIFIED PYTHON PROTOTYPE (translate the behavior):
+  ```python
+  def solve(stdin: str) -> str:
+      lines = stdin.split()
+      return ' '.join(lines)
+  
+  ```
+
+==============================================================================
+8. WRITE - local, always runs
+==============================================================================
+
+  code: agent/graph.py :: node_write()
+  BenchmarkSolutionTool runs first, but only above 80s remaining AND only if tests pass
+  then, unconditionally:
+    solutions/<stem>.py        the solution, or the prototype for rust targets
+    solutions/<stem>.rs        for rust targets
+    solutions/<stem>.meta.json phase, runtime, models, verified flags, elapsed,
+                               cost_usd, usage by model/tier, analysis, plan,
+                               generate meta, every verify case, repairs,
+                               benchmark, and every timed event
+
+  failure containment:
+    - each node catches its own exceptions and drops to its local fallback
+    - Orchestrator.solve_file wraps the whole run; anything that escapes still
+      writes the in-flight candidate + meta.json with salvaged/error/traceback
+
+==============================================================================
+9. SUMMARY - every model call in one 300s run
+==============================================================================
+
+  #  stage               model                         effort   budget
+  ----------------------------------------------------------------------
+  1  plan                claude-haiku-4-5-20251001     low      $0.50
+  2  generate:python     claude-opus-5                 high     $2.00
+  3  generate:rust-proto claude-opus-5                 high     $2.00
+  4  tests:adversarial   claude-haiku-4-5-20251001     low      $0.50
+  5  repair:python       claude-opus-5                 medium   $2.00
+  6  repair:rust         claude-opus-5                 medium   $2.00
+  7  emit_rust           claude-opus-5                 high     $2.00
+
+  A python problem makes 3 calls (plan, tests, generate); a rust problem makes 4
+  (plus emit_rust); each failed verify can add up to 3 more (repair).
+
+==============================================================================
+10. UNIT TESTS - tests/test_architecture.py, all offline
+==============================================================================
+
+  36 tests, no network and no CLI required:
+    - test_a_bad_number_falls_back_instead_of_crashing
+    - test_a_graph_failure_salvages_the_best_candidate
+    - test_a_node_failure_still_writes_a_solution
+    - test_analyzer_finds_traps
+    - test_benchmark_needs_analysis
+    - test_benchmark_skipped_when_failing
+    - test_both_graph_shapes_produce_the_same_run
+    - test_call_timeout_protects_the_write_reserve
+    - test_chat_falls_back_locally_when_the_cli_is_missing
+    - test_chat_skips_the_cli_when_the_clock_is_short
+    - test_cli_call_is_hermetic
+    - test_cli_pipes_are_pinned_to_utf8
+    - test_deadline_counts_down
+    - test_effort_steps_down_near_the_deadline
+    - test_env_file_survives_bom_and_codepage
+    - test_env_file_values_drop_inline_comments
+    - test_every_tier_is_a_claude_model_on_the_cli
+    - test_exit_code_reports_a_run_that_wrote_nothing
+    - test_extract_rust_fence
+    - test_langgraph_compiles
+    - test_model_chain_starts_at_the_tier_and_degrades
+    - test_only_sessions_we_minted_can_be_resumed
+    - test_outcome_classifies_every_ending
+    - test_parallel_mode_fans_generate_and_tests_out_of_plan
+    - test_parse_result_skips_noise_lines
+    - test_payload_error_catches_a_soft_api_failure
+    - test_plan_llm_defaults_on_and_is_a_real_setting
+    - test_plan_llm_off_skips_the_model_entirely
+    - test_reply_reads_tokens_cost_and_structured_output
+    - test_resume_forks_into_a_session_id_we_chose
+    - test_routing_escalates_on_hard_repair
+    - test_rust_sample_targets_rust
+    - test_stub_is_rejected
+    - test_verifier_catches_syntax_and_missing_entry
+    - test_windows_prefers_the_launchable_shim
+    - test_worker_body_captures_output_and_never_raises
