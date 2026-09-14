@@ -82,7 +82,7 @@ def heuristic_plan(analysis: Analysis) -> Plan:
 
 def plan_solution(analysis: Analysis, remaining_s: float) -> Plan:
     fallback = heuristic_plan(analysis)
-    if remaining_s < 25:
+    if not config.PLAN_LLM or remaining_s < 25:
         return fallback
 
     prompt = {

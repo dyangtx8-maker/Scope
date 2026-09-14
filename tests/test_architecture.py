@@ -31,6 +31,7 @@ from agent.models import (
     reset_usage,
 )
 from agent.orchestrator import Deadline, solve_problem
+from agent.planner import plan_solution
 from agent.graph import build_graph
 from solve import _outcome as outcome
 from solve import _solve_one as solve_worker
@@ -361,6 +362,34 @@ class ArchitectureTests(unittest.TestCase):
             self.assertEqual(outcome(Path("p"), {"salvaged": True}, ""), "salvaged")
             self.assertEqual(outcome(Path("p"), {"verified": True}, ""), "ok")
             self.assertEqual(outcome(Path("p"), {"verified": False}, ""), "unverified")
+
+    def test_plan_llm_defaults_on_and_is_a_real_setting(self) -> None:
+        # Setting config.PLAN_LLM inside a test creates the attribute, so the
+        # switch can look wired while the module ships no default at all.
+        self.assertIn("PLAN_LLM", vars(config))
+        self.assertIs(config.PLAN_LLM, True)
+
+    def test_plan_llm_off_skips_the_model_entirely(self) -> None:
+        problem = json.loads(SAMPLE.read_text())
+        analysis = analyze_problem(problem)
+        called = []
+        from agent import planner
+
+        real_chat = planner.chat
+        planner.chat = lambda *a, **k: called.append(1)
+        config.PLAN_LLM = False
+        try:
+            plan = plan_solution(analysis, 300.0)
+        finally:
+            planner.chat = real_chat
+            config.PLAN_LLM = True
+        self.assertEqual(called, [])  # no CLI call at all
+        self.assertEqual(plan.model, "local-heuristic")
+        self.assertTrue(plan.fallback)
+        self.assertEqual(plan.cost_usd, 0.0)
+        # the analyzer-derived fields still arrive
+        self.assertIn("simulate_writes", plan.python_signature)
+        self.assertTrue(plan.traps_to_handle)
 
     def test_windows_prefers_the_launchable_shim(self) -> None:
         self.assertEqual(models.bin_candidates("claude", windows=False), ["claude"])

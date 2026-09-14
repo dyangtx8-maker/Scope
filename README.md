@@ -133,6 +133,9 @@ python3 tests/test_architecture.py         # no network, no CLI needed
 python3 solve.py problems/problem_01.json
 ```
 
+`CLAUDE_PLAN_LLM=0` skips the planning model call and uses the local heuristic
+plan, freeing the 70-130s a plan call costs for generation and repair.
+
 `--all --jobs N` solves N problems at once in a process pool; each keeps its
 own deadline, so 4 is a sane ceiling on a laptop. Generation and test-writing
 already overlap within a single problem (`CLAUDE_PARALLEL_STAGES=0` disables

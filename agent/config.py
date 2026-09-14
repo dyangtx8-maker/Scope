@@ -174,6 +174,12 @@ REUSE_SESSION = _flag("CLAUDE_REUSE_SESSION", True)
 # to 0 on a machine where two concurrent CLI processes contend.
 PARALLEL_STAGES = _flag("CLAUDE_PARALLEL_STAGES", True)
 
+# Ask a model for the plan at all. With 0 the planner returns its local
+# heuristic immediately - no CLI call, no cost - which hands the 70-130s a
+# plan call takes back to generation and repair. The analyzer still supplies
+# the signature, return hint and trap list either way.
+PLAN_LLM = _flag("CLAUDE_PLAN_LLM", True)
+
 # Spend guardrails handed to `claude --max-budget-usd`. They replace the old
 # max_tokens caps: with the CLI the useful bound is money, not tokens. Set a
 # stage to 0 to drop the flag.

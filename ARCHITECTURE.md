@@ -146,7 +146,7 @@ deadline.
 
 **Analyze** (`agent/analyzer.py`). No LLM. Parses entrypoint, Python vs Rust, huge bounds (`10**18`, `200,000`, …), materialization warnings, wording traps, and a difficulty tag.
 
-**Plan** (`agent/planner.py`). Cheap-tier Claude JSON, validated against `PLAN_SCHEMA` by `claude --json-schema`: approach, structures, complexity target, traps, test ideas. Falls back to a local heuristic plan.
+**Plan** (`agent/planner.py`). Cheap-tier Claude JSON, validated against `PLAN_SCHEMA` by `claude --json-schema`: approach, structures, complexity target, traps, test ideas. Falls back to a local heuristic plan built from the analyzer alone - same eleven fields, with the canned approach text and the analyzer's signature, return hint and trap list. `CLAUDE_PLAN_LLM=0` skips the model call entirely and takes that heuristic directly: on `problem_01` that turned a 182s run into a 65s one with the same 8/8 verdict and the same cost, because the plan call was timing out at its 120s cap anyway. Whether it helps where the plan *succeeds* is unmeasured.
 
 **Generate** (`agent/generator.py`). Python stdlib function named by the spec. Rust samples first get a Python `solve(stdin) -> str` prototype, then a `fn main()` program.
 
