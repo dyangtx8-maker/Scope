@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 
-from . import config
 from .analyzer import Analysis
 from .models import chat, choose_tier, extract_code
 from .planner import Plan
@@ -84,7 +83,6 @@ def generate_python(
         messages,
         tier=tier,
         remaining_s=remaining_s,
-        budget_usd=config.GENERATE_BUDGET_USD,
         resume_session=session_id,
         resumable=True,
         fallback_text=fallback,
@@ -99,8 +97,7 @@ def generate_python(
             messages,
             tier="normal",
             remaining_s=left - 2.0,
-            budget_usd=config.GENERATE_BUDGET_USD,
-            resumable=True,
+                resumable=True,
             fallback_text=fallback,
         )
     code = extract_code(reply.text, "python") or fallback
@@ -152,7 +149,6 @@ def generate_rust(
         ],
         tier=tier,
         remaining_s=remaining_s,
-        budget_usd=config.GENERATE_BUDGET_USD,
         resume_session=session_id,
         resumable=True,
         fallback_text=fallback,

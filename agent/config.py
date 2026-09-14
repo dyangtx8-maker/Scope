@@ -139,9 +139,9 @@ NORMAL_PROVIDER = PROVIDER
 STRONG_PROVIDER = PROVIDER
 FALLBACK_PROVIDER = PROVIDER
 
-# Plan / adversarial tests.
-CHEAP_MODEL = setting("CLAUDE_CHEAP_MODEL", "claude-opus-5")
-# Python / Rust generation and repair.
+# Plan only. The only stage allowed a cheap model.
+CHEAP_MODEL = setting("CLAUDE_CHEAP_MODEL", "claude-haiku-4-5-20251001")
+# Python / Rust generation, repair, Rust emission.
 NORMAL_MODEL = setting("CLAUDE_NORMAL_MODEL", "claude-opus-5")
 # Hard problems and escalated repairs.
 STRONG_MODEL = setting("CLAUDE_STRONG_MODEL", "claude-opus-5")
@@ -187,15 +187,7 @@ PARALLEL_STAGES = _flag("CLAUDE_PARALLEL_STAGES", True)
 PLAN_LLM = _flag("CLAUDE_PLAN_LLM", True)
 # Append the exact argv, system prompt, user prompt and reply of every CLI call
 # to this path. Empty disables it. solve.py --log-prompts PATH sets it too.
-PROMPT_LOG = setting("CLAUDE_PROMPT_LOG", "")
-
-# Spend guardrails handed to `claude --max-budget-usd`. They replace the old
-# max_tokens caps: with the CLI the useful bound is money, not tokens. Set a
-# stage to 0 to drop the flag.
-PLAN_BUDGET_USD = _float("CLAUDE_PLAN_BUDGET_USD", "0.50")
-TESTGEN_BUDGET_USD = _float("CLAUDE_TESTGEN_BUDGET_USD", "0.50")
-GENERATE_BUDGET_USD = _float("CLAUDE_GENERATE_BUDGET_USD", "2.00")
-REPAIR_BUDGET_USD = _float("CLAUDE_REPAIR_BUDGET_USD", "2.00")
+PROMPT_LOG = setting("CLAUDE_PROMPT_LOG", "hone.log")
 
 # ------------------------------------------------------------------ deadline
 # Re-tuned for CLI latency: a `claude -p` turn costs process start-up plus
@@ -204,10 +196,6 @@ REPAIR_BUDGET_USD = _float("CLAUDE_REPAIR_BUDGET_USD", "2.00")
 RESERVE_S = 20.0
 LATE_PHASE_S = 70.0
 MIN_REPAIR_S = 60.0
-# Adversarial tests are optional: only spend a CLI round trip on them while
-# there is still room for a repair afterwards.
-ADVERSARIAL_MIN_S = 90.0
-
 MAX_REPAIRS = 3
 VERIFY_TIMEOUT_S = 3.0
 BENCHMARK_TIMEOUT_S = 1.5

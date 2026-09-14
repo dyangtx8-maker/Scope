@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent import config, models
+from agent import config, models, verifier
 from agent.analyzer import analyze_problem
 from agent.config import CHEAP_MODEL, CHEAP_PROVIDER, NORMAL_MODEL, STRONG_MODEL
 from agent.models import (
@@ -36,7 +37,7 @@ from agent.graph import build_graph
 from solve import _outcome as outcome
 from solve import _solve_one as solve_worker
 from solve import main as solve_main
-from agent.tools import BenchmarkSolutionTool, ToolContext, maybe_run
+from agent.tools import BenchmarkSolutionTool, GenerateTestsTool, ToolContext, maybe_run
 from agent.verifier import looks_like_stub, spec_cases, syntax_check, verify
 
 
@@ -117,14 +118,45 @@ class ArchitectureTests(unittest.TestCase):
         self.assertTrue(any("simulate_writes" in hint for hint in report.hints))
 
 
-    def test_every_tier_is_a_claude_model_on_the_cli(self) -> None:
+    def test_routing_puts_only_the_plan_on_a_cheap_model(self) -> None:
         for tier in ("cheap", "normal", "strong"):
             self.assertEqual(provider_for(tier), "claude-cli")
             self.assertTrue(models.model_for(tier).startswith("claude-"))
         self.assertEqual(CHEAP_PROVIDER, "claude-cli")
-        # Every stage runs Opus by default.
-        for model in (CHEAP_MODEL, NORMAL_MODEL, STRONG_MODEL):
-            self.assertIn("opus", model)
+        # Plan is the only stage allowed a cheap model, and only at low effort.
+        self.assertIn("haiku", CHEAP_MODEL)
+        self.assertEqual(config.EFFORT_BY_TIER["cheap"], "low")
+        self.assertEqual(models.choose_tier("plan", "hard", 300), "cheap")
+        # Everything that writes code runs Opus.
+        self.assertIn("opus", NORMAL_MODEL)
+        self.assertIn("opus", STRONG_MODEL)
+        for stage in ("generate", "repair"):
+            tier = models.choose_tier(stage, "hard", 300, repair_attempt=1)
+            self.assertIn("opus", models.model_for(tier), stage)
+
+    def test_no_spend_cap_reaches_the_command_line(self) -> None:
+        """The deadline is the only budget; --max-budget-usd is gone."""
+        argv = build_argv(model=NORMAL_MODEL, system="sys", effort="high")
+        self.assertNotIn("--max-budget-usd", argv)
+        self.assertNotIn("budget_usd", inspect.signature(chat).parameters)
+        self.assertNotIn("budget_usd", inspect.signature(build_argv).parameters)
+
+    def test_test_cases_are_built_without_a_model(self) -> None:
+        """The tests stage is local: spec cases only, no adversarial call."""
+        self.assertFalse(hasattr(verifier, "propose_adversarial_tests"))
+        problem = json.loads(SAMPLE.read_text())
+        analysis = analyze_problem(problem)
+        ctx = ToolContext(remaining_s=300.0)
+        ctx.analysis, ctx.problem = analysis, problem
+        real_invoke = models._invoke
+        models._invoke = lambda *a, **k: self.fail("the tests stage called the CLI")
+        try:
+            result = maybe_run(GenerateTestsTool(), ctx)
+        finally:
+            models._invoke = real_invoke
+        self.assertTrue(result.used)
+        self.assertGreaterEqual(len(ctx.tests), 3)
+        self.assertEqual({t["kind"] for t in ctx.tests} - {"spec", "static_trap", "public"}, set())
 
     def test_every_chain_keeps_a_rung_below_the_primary(self) -> None:
         """A one-model chain sends a timeout straight to the local skeleton."""
@@ -179,8 +211,8 @@ class ArchitectureTests(unittest.TestCase):
                          "REPLY TEXT", "$0.2500"):
             self.assertIn(fragment, written)
 
-    def test_prompt_log_off_by_default_and_never_raises(self) -> None:
-        self.assertEqual(config.PROMPT_LOG, "")
+    def test_prompt_log_defaults_to_hone_log_and_never_raises(self) -> None:
+        self.assertEqual(config.PROMPT_LOG, "hone.log")
         config.PROMPT_LOG = "/nonexistent-dir/cannot/write.log"
         try:
             models._log_call(["claude"], "s", "u", None, "boom", 0.1)  # must not raise

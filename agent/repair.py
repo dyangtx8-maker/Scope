@@ -57,7 +57,6 @@ def repair_solution(
         ],
         tier=tier,
         remaining_s=remaining_s,
-        budget_usd=config.REPAIR_BUDGET_USD,
         resume_session=session_id,
         resumable=True,
         fallback_text=code,

@@ -2,9 +2,11 @@
 
 Every tier is a Claude model reached by shelling out to `claude -p`:
 
-    cheap   -> claude-haiku-4-5   plan, adversarial test ideas
-    normal  -> claude-sonnet-5    Python / Rust generation, repair
+    cheap   -> claude-haiku-4-5   plan (optional; the only cheap stage)
+    normal  -> claude-opus-5      Python / Rust generation, repair
     strong  -> claude-opus-5      hard problems, escalated repair
+
+Analysis, test cases, verification, benchmarking and writing never call a model.
 
 The CLI owns authentication, overload fallback (`--fallback-model`), prompt
 caching and session storage, so this module only has to build an argv, feed
@@ -280,7 +282,6 @@ def build_argv(
     system: str,
     effort: str,
     json_schema: Optional[dict[str, Any]] = None,
-    budget_usd: float = 0.0,
     fallback_models: Optional[list[str]] = None,
     resume: str = "",
     session_id: str = "",
@@ -308,8 +309,6 @@ def build_argv(
         argv += ["--system-prompt", system]
     if fallback_models:
         argv += ["--fallback-model", ",".join(fallback_models)]
-    if budget_usd and budget_usd > 0:
-        argv += ["--max-budget-usd", f"{budget_usd:.2f}"]
     if json_schema:
         argv += ["--json-schema", json.dumps(json_schema, separators=(",", ":"))]
     if resume:
@@ -533,7 +532,6 @@ def chat(
     remaining_s: float = 0.0,
     json_mode: bool = False,
     json_schema: Optional[dict[str, Any]] = None,
-    budget_usd: float = 0.0,
     timeout_s: Optional[float] = None,
     resume_session: str = "",
     resumable: bool = False,
@@ -579,7 +577,6 @@ def chat(
                 system=system,
                 effort=effort,
                 json_schema=schema,
-                budget_usd=budget_usd,
                 fallback_models=chain[index + 1 :],
                 resume=resume,
                 session_id=session_id,

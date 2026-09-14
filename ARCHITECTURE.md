@@ -11,9 +11,9 @@ The control loop is a small **LangGraph** state machine. The brains of each step
 ```text
 problem JSON
   → analyze (local)
-  → plan (Claude Haiku 4.5)
+  → plan (Claude Haiku 4.5 at low effort, or skipped entirely)
   ├─ generate (Claude Sonnet 5, Opus 5 on hard problems) ─┐   in parallel
-  └─ tests (local spec + optional Claude Haiku adversarial)┘
+  └─ tests (local spec cases, no model)                    ┘
   → verify (local)
        ├─ fail + time left → repair (Claude, escalating tier) → verify
        ├─ Rust target → emit fn main() (Claude)
@@ -38,12 +38,15 @@ Every tier is a Claude model and the only transport is the Claude Code CLI.
 
 | Job | Tier | Model | `--effort` |
 |---|---|---|---|
-| Plan, adversarial test ideas | cheap | `claude-opus-5` | low |
+| Plan (optional) | cheap | `claude-haiku-4-5-20251001` | low |
 | Python / Rust generation, repair | normal | `claude-opus-5` | medium |
 | Hard problems, escalated repair | strong | `claude-opus-5` | high |
-| Trap extraction, spec tests, stub check, benchmark, disk write | — | local, no model | — |
+| Trap extraction, **test cases**, stub check, verify, benchmark, disk write | — | local, no model | — |
 
-Every stage runs Opus; the tiers now differ only by `--effort`. On failure `agent/models.py` walks the chain Opus → `claude-sonnet-5` → local fallback text, and hands the rest of the chain to `claude --fallback-model` so plain overload is retried inside a single invocation.
+Four model calls exist in the pipeline and no others: plan, generate, repair,
+emit_rust. Everything else is Python.
+
+Plan is the only stage allowed a cheap model, and only at low effort; every stage that writes code runs Opus. On failure `agent/models.py` walks the chain Opus → `claude-sonnet-5` → local fallback text, and hands the rest of the chain to `claude --fallback-model` so plain overload is retried inside a single invocation.
 
 **One attempt never spends the whole budget.** While a fallback rung remains, an attempt is capped at `CLI_FIRST_ATTEMPT_SHARE` (0.6) of what is left. Without that, a timeout on the first model consumes the pool and every fallback dies on the clock too: `problem_04` burned 120s on Opus, 120s on Sonnet, and wrote a `NotImplementedError` stub at 254s. With the share and a 240s ceiling the same problem verifies 5/5 in 128s.
 
@@ -60,8 +63,7 @@ No key lives in this repo. The CLI authenticates itself (`claude login`, or `ANT
 | `--safe-mode`, `--strict-mcp-config` | a developer's CLAUDE.md, skills, hooks, plugins or MCP servers cannot change what the agent generates |
 | private empty `cwd` | no repo file or project memory leaks into the prompt |
 | explicit `--session-id` | a parent Claude Code process exports `CLAUDE_CODE_SESSION_ID`; an inherited id must never become resumable |
-| `--json-schema` | plan and adversarial-test JSON is validated by the CLI and returned as `structured_output` |
-| `--max-budget-usd` | per-stage spend guardrail, the CLI-era replacement for `max_tokens` |
+| `--json-schema` | the plan JSON is validated by the CLI and returned as `structured_output` |
 | `--effort` | the replacement for the old provider `reasoning_effort`, stepped down one notch when under `EFFORT_DOWNGRADE_S` |
 | `--fallback-model` | overload retries happen inside one invocation |
 
@@ -75,7 +77,7 @@ returned a usable plan for $0.068 while the prompt-only run returned text this r
 could not parse, for $0.098, in the same wall clock. Both JSON stages therefore ship
 a schema, and `chat()` still falls back to prompted JSON if the CLI ever rejects one.
 
-**Timeouts.** Every call is bounded by `min(CLI_TIMEOUT_S, remaining - RESERVE_S)`. Under `CLI_MIN_CALL_S` the stage does not call a model at all and takes its local fallback, so the writer always keeps its reserve. A CLI turn costs process start-up plus thinking time, so `LATE_PHASE_S` (70s), `MIN_REPAIR_S` (60s) and `ADVERSARIAL_MIN_S` (90s) were raised from their HTTP-era values: each one now has to cover a whole round trip, not a fast API call.
+**Timeouts.** Every call is bounded by `min(CLI_TIMEOUT_S, remaining - RESERVE_S)`. Under `CLI_MIN_CALL_S` the stage does not call a model at all and takes its local fallback, so the writer always keeps its reserve. A CLI turn costs process start-up plus thinking time, so `LATE_PHASE_S` (70s) and `MIN_REPAIR_S` (60s) were raised from their HTTP-era values: each one now has to cover a whole round trip, not a fast API call. There is no spend cap - the deadline is the only limit.
 
 ## Parallelism
 
@@ -139,7 +141,7 @@ retried on the normal tier, and Sonnet produced the prototype and the `fn main()
 
 A CLI turn costs far more wall clock than the HTTP call it replaced - 20s to 140s
 here against seconds - so a 300s deadline buys roughly two or three model turns.
-That is what the raised `LATE_PHASE_S`, `MIN_REPAIR_S` and `ADVERSARIAL_MIN_S`
+That is what the raised `LATE_PHASE_S` and `MIN_REPAIR_S`
 thresholds are for: the budget goes into one good candidate instead of repair
 rounds that cannot finish. Both runs still wrote a solution well inside the
 deadline.
@@ -152,7 +154,7 @@ deadline.
 
 **Generate** (`agent/generator.py`). Python stdlib function named by the spec. Rust samples first get a Python `solve(stdin) -> str` prototype, then a `fn main()` program.
 
-**Tests** (`agent/verifier.py` + `GenerateTestsTool`). Spec cases with expected values derived from the statement (empty, invalid, implicit error, …). Optional adversarial cases from the cheap Claude tier. Adversarial mismatches are **soft** so a wrong LLM expected value cannot fail a spec-correct solution.
+**Tests** (`agent/verifier.py` + `GenerateTestsTool`). Local only, no model call: spec cases with expected values derived from the statement (empty, invalid, implicit error, …), a stdin smoke case for Rust, and a static-trap case when the analyzer found huge bounds. Runs concurrently with generation.
 
 **Verify**. Syntax, required entrypoint, stub/echo rejection, subprocess run with timeout, expected-value compare. Static ban on `range(10**18)`-style loops.
 

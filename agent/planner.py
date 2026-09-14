@@ -130,7 +130,6 @@ def plan_solution(analysis: Analysis, remaining_s: float) -> Plan:
         remaining_s=remaining_s,
         json_mode=True,
         json_schema=PLAN_SCHEMA,
-        budget_usd=config.PLAN_BUDGET_USD,
         fallback_text="",
     )
     data = reply_json(reply)
